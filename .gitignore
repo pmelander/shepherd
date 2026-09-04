@@ -1,0 +1,38 @@
+# Secrets — the relay generates its HMAC secret at first run.
+# This must never be committed; the firmware bakes it in at build time.
+bellwether.secret
+*.secret
+secrets/
+.env
+.env.*
+
+# Python (relay/)
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+
+# PlatformIO (firmware/)
+.pio/
+.pioenvs/
+.piolibdeps/
+firmware/.pio/
+
+# Build output / firmware images
+*.bin
+*.elf
+*.map
+
+# Local audit log — contains full prompt text from work repos
+bellwether-audit.log
+*.audit.log
+
+# Editors / OS
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
