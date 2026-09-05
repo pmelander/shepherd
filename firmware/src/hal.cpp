@@ -301,25 +301,33 @@ bool _wordContains(const std::vector<char>& v, char c) {
 
 void _pollKeyEvents() {
   auto& st = M5Cardputer.Keyboard.keysState();
-  // Rising-edge scan of printable keys. Skip while Fn is held so the
-  // Fn-layer (if ever used for something) can't spuriously fire shortcuts.
-  if (!st.fn) {
-    for (char c : st.word) {
-      if (_wordContains(_prevWord, c)) continue;
-      HalKey k = HalKey::None;
-      switch (c) {
-        case ';': k = HalKey::Up;      break;
-        case '.': k = HalKey::Down;    break;
-        case ',': k = HalKey::Left;    break;
-        case '/': k = HalKey::Right;   break;
-        case 'y': case 'Y': k = HalKey::Approve; break;
-        case 'n': case 'N': k = HalKey::Deny;    break;
-        case 'm': case 'M': k = HalKey::Menu;    break;
-        case 'g': case 'G': k = HalKey::Demo;    break;
-        case '`':           k = HalKey::Back;    break;  // physical Esc position
-      }
-      if (k != HalKey::None) _pushKey(k);
+  // Fn is the lock chord's modifier. Holding it suppresses every ordinary
+  // key event, so Fn+Enter is an input shape one point of pressure cannot
+  // make — which is the whole reason Shepherd's key lock uses it rather than
+  // a key sequence, since cloth can eventually type any sequence.
+  if (st.fn) {
+    if (st.enter && !_prevEnter) _pushKey(HalKey::Unlock);
+    _prevEnter = st.enter;
+    _prevDel   = st.del;
+    _prevWord  = st.word;
+    return;
+  }
+  // Rising-edge scan of printable keys.
+  for (char c : st.word) {
+    if (_wordContains(_prevWord, c)) continue;
+    HalKey k = HalKey::None;
+    switch (c) {
+      case ';': k = HalKey::Up;      break;
+      case '.': k = HalKey::Down;    break;
+      case ',': k = HalKey::Left;    break;
+      case '/': k = HalKey::Right;   break;
+      case 'y': case 'Y': k = HalKey::Approve; break;
+      case 'n': case 'N': k = HalKey::Deny;    break;
+      case 'm': case 'M': k = HalKey::Menu;    break;
+      case 'g': case 'G': k = HalKey::Demo;    break;
+      case '`':           k = HalKey::Back;    break;  // physical Esc position
     }
+    if (k != HalKey::None) _pushKey(k);
   }
   // Dedicated keys (Enter / Del) aren't in .word — they have their own
   // state bools. Edge-detect each so Enter confirms and Del closes modals

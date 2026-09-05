@@ -126,6 +126,10 @@ void halLedSet(uint8_t r, uint8_t g, uint8_t b);
 //   Shortcut letters — `y` / `n` / `m` / `g`
 // The Cardputer has a hardware power slide switch, so there's no software
 // power chord — the existing 30 s idle auto-sleep handles the screen.
+//
+// Fn is the one modifier: while it is held no ordinary key event is emitted
+// at all, which makes Fn+key the only input shape a single point of pressure
+// cannot produce. Shepherd's key lock uses that.
 // ---------------------------------------------------------------------------
 enum class HalKey : uint8_t {
   None = 0,
@@ -135,5 +139,6 @@ enum class HalKey : uint8_t {
   Back,          // Esc (backtick) / Del / Backspace — close modal
   Menu,          // m
   Demo,          // g
+  Unlock,        // Fn+Enter — toggles Shepherd's key lock
 };
 HalKey halPollKey();

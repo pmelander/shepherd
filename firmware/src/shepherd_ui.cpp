@@ -75,6 +75,7 @@ static bool signMessage(const char* msg, size_t msgLen, char* out, size_t cap) {
 // ---------------------------------------------------------------- state
 
 static ShepherdFrame g_frame;
+static ShepherdLock g_lock;
 static uint32_t g_lastFrameMs = 0;
 static bool g_everReceived = false;
 static bool g_badVersion = false;
@@ -91,6 +92,7 @@ static const uint16_t C_BLOCKED = 0xFB40;   // amber: someone is waiting
 static const uint16_t C_DONE    = 0x07E0;   // green: finished, unseen
 static const uint16_t C_WORKING = 0x3D7F;   // blue
 static const uint16_t C_STALE   = 0xF800;   // red: we cannot see
+static const uint16_t C_LOCK    = 0x7BEF;   // grey: keys are inert, not broken
 
 static uint16_t statusColour(const ShepherdAgent& a) {
   if (a.isBlocked()) return C_BLOCKED;
@@ -152,6 +154,9 @@ bool shepherdUiActive() {
 }
 
 bool shepherdUiNeedsAttention() {
+  // Deliberately blind to the lock. The lock governs what a key may DO, not
+  // whether you get told — a locked device that stayed quiet about a blocked
+  // agent would be a worse device, not a safer one.
   if (stale() || g_badVersion) return false;
   // Showable, not answerable: an agent whose question was truncated still
   // stopped and still wants you. "You must open the laptop" is attention too.
@@ -165,6 +170,13 @@ static void drawHeader(M5Canvas& spr, int W) {
   spr.setTextDatum(TL_DATUM);
   spr.setTextColor(C_DIM, C_BG);
   spr.drawString("SHEPHERD", 4, 3);
+  // The lock is stated, always. Its whole job is to make keys do nothing,
+  // and an unexplained dead key is the exact failure this project already
+  // spent a session chasing once.
+  if (g_lock.locked(millis())) {
+    spr.setTextColor(C_LOCK, C_BG);
+    spr.drawString("LOCKED", 58, 3);
+  }
 
   char right[40];
   if (stale()) {
@@ -298,7 +310,11 @@ static void drawQueue(M5Canvas& spr, int W, int H, int idx) {
 
   spr.drawFastHLine(0, H - 14, W, C_DIM);
   spr.setTextColor(C_DIM, C_BG);
-  if (!canApprove) {
+  if (g_lock.locked(millis())) {
+    // Advertise the way out rather than the keys that will not work.
+    spr.setTextColor(C_LOCK, C_BG);
+    spr.drawString("locked - Fn+Enter to unlock", 6, H - 11);
+  } else if (!canApprove) {
     spr.drawString("[n] deny   [>] next", 6, H - 11);
   } else {
     spr.drawString("[y] approve  [n] deny  [>] next", 6, H - 11);
@@ -363,6 +379,26 @@ static void sendAct(const ShepherdAgent& a, const char* action) {
 
 bool shepherdUiKey(HalKey k) {
   if (!shepherdUiActive()) return false;
+
+  const uint32_t now = millis();
+
+  // The lock is checked before the version and staleness gates, so the chord
+  // still works on a screen that is refusing to render anything else. Being
+  // unable to unlock a NO SIGNAL device would mean waiting out a reconnect
+  // with a dead keyboard.
+  if (k == HalKey::Unlock) {
+    note(g_lock.toggle(now) ? "locked" : "unlocked");
+    return true;
+  }
+  // accept() both tests the lock and, when it passes, resets the idle timer:
+  // using the device is what keeps it awake.
+  if (!g_lock.accept(now)) {
+    // Consumed, not passed on. While Shepherd owns the screen a locked key
+    // must not reach the buddy's own approve path either. And it says so,
+    // because a silent no-op is how the last bug presented.
+    note("locked - Fn+Enter");
+    return true;
+  }
   if (g_badVersion || stale()) return false;
 
   // Keys follow the screen: whatever drawQueue is showing is what y/n act on.

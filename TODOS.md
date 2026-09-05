@@ -14,17 +14,29 @@
 **Priority:** P3
 **Depends on:** BLE pairing-policy probe passing; the firmware fork building
 
-### Key lock / screen-off state for pocket carry
+### ~~Key lock / screen-off state for pocket carry~~ — DONE
 
-**What:** A lock or sleep state so the device can be carried without every key being live against the queued prompt.
+Built as `src/shepherd_lock.h` plus a `HalKey::Unlock` chord. Locked at boot,
+re-locked after 30s of no keys, unlocked by **Fn+Enter**.
 
-**Why:** The acceptance test is "device in a pocket". IMU wake is cut from v1, so there is no sleep state and no wake gesture — every one of the 56 keys is live all the time. A pocket press can approve the real prompt waiting in the queue before it has been read.
+Fn is the chord because the keyboard scanner already suppresses every
+ordinary key event while Fn is held, which makes Fn+key the one input shape a
+single point of pressure cannot produce. A key *sequence* was rejected: cloth
+has all day, and will eventually type any sequence.
 
-**Context:** The BMI270 is on the board and `y88huang/claude-desktop-buddy-cardputer` already implements shake and face-down nap detection, so most of the mechanism is in the code being forked — this is closer than the "IMU cut from v1" scope line suggests. Interacts with the queue-first decision from this review: the queue is what a stray key would act on. Damage is bounded by send-time re-verification and the truncation gate, so a stray press cannot approve something arbitrary, only something real and early. Revisit after the first accidental keypress, which will tell you how real the problem is.
+The screen deliberately stays on. This is a glance device — reading the herd
+without touching it is the product — and upstream's 30s idle sleep already
+handles the backlight. The lock governs what keys may DO, not what is shown,
+and `shepherdUiNeedsAttention()` is blind to it so a locked device still
+chirps.
 
-**Effort:** S
-**Priority:** P2
-**Depends on:** The firmware fork building
+Pinned by 8 native tests, including the millis() wrap: a device left on a
+shelf crosses it every ~49.7 days, and a sloppy comparison there would hold
+the lock *open*.
+
+Still open from the original note: IMU wake (shake / face-down) is upstream
+code that remains unused. Worth revisiting only if the Fn chord turns out to
+be annoying in daily use.
 
 ## Relay
 

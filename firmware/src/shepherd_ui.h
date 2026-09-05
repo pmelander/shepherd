@@ -14,6 +14,7 @@
 #include <M5GFX.h>
 
 #include "shepherd_frame.h"
+#include "shepherd_lock.h"
 #include "hal.h"
 
 // A frame older than this is not worth drawing. The host sends a keepalive
