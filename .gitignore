@@ -36,3 +36,7 @@ bellwether-audit.log
 .idea/
 Thumbs.db
 desktop.ini
+
+# Probe artefacts (plugin environment captures)
+.probe3-env.jsonl
+plugin/.probe3-env.jsonl
