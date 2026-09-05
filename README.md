@@ -163,15 +163,18 @@ something is blocked, Shepherd stands back: the buddy gets the screen, with the 
 along the bottom as one coloured segment per agent. Unlock and the list returns.
 
 ```
-              ( o.o )              <- mood follows the herd
-               /|_|      ▂▂▂▂   ▂▂▂▂   ▂▂▂▂   ▂▂▂▂    <- solid = working, thin = at rest
-     newpr   elasm   tempc   agent      green = finished, unseen
+              ( o.o )                    <- mood follows the herd
+               /|_|    ████  ▄▄▄▄  ████  ▄▄▄▄  ▄▄▄▄  Fn+Del <- solid = working, thin = at rest
 ```
 
+No names. Four characters of alias is recognisable for five agents and useless for ten,
+and a strip that only works at small herd sizes stops working exactly when you most need
+to see the shape of things. Colour and bar height carry it — green for finished-and-unseen
+— and the list is one keypress away when you need to know which is which.
+
 Segments share the width evenly and stop growing at 40px, so two agents read as two
-agents rather than as a progress bar. Names drop out below four characters rather than
-degrading into initials — a count takes their place. A thirteenth agent shows as `+1`,
-because the one screen meant to show all of them must not silently show twelve.
+agents rather than as a progress bar. A thirteenth shows as `+1`, because the one screen
+meant to show all of them must not silently show twelve.
 
 His mood is the herd: **attention** when an agent is blocked, **celebrate** when one has
 just finished, **busy** when three or more are working, **idle** otherwise. Upstream's

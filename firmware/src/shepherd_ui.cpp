@@ -608,9 +608,11 @@ static void drawQueue(M5Canvas& spr, int W, int H, int idx) {
   }
 }
 
-// Height of the strip band. Matches the HUD area upstream already clears at
-// the bottom of the sprite, so the pet above it is untouched.
-#define SH_STRIP_H 28
+// Height of the strip band. Inside the area upstream's own HUD clears at the
+// bottom of the sprite, so the pet above it is untouched — and smaller than
+// that area, because there are no names to make room for and every pixel not
+// spent here is pet.
+#define SH_STRIP_H 22
 
 void shepherdUiStrip(M5Canvas& spr, int W, int H) {
   const int top = H - SH_STRIP_H;
@@ -623,7 +625,7 @@ void shepherdUiStrip(M5Canvas& spr, int W, int H) {
   if (n <= 0) {
     spr.setTextDatum(MC_DATUM);
     spr.setTextColor(C_DIM, C_BG);
-    spr.drawString(g_frame.degraded ? g_frame.why : "no agents", W / 2, H - 14);
+    spr.drawString(g_frame.degraded ? g_frame.why : "no agents", W / 2, H - 11);
     spr.setTextDatum(TL_DATUM);
     return;
   }
@@ -634,14 +636,14 @@ void shepherdUiStrip(M5Canvas& spr, int W, int H) {
   if (segW > 40) segW = 40;
   if (segW < 6) segW = 6;
   const int x0 = (W - segW * n) / 2;
-  const int barY = top + 5;
-  const int labelY = top + 15;
-  // 6px per glyph, and leave a gap: below four characters an alias is not
-  // recognisable enough to be worth the row, so the labels drop out entirely
-  // rather than becoming a line of initials.
-  const int chars = (segW - 4) / 6;
-  const bool labels = chars >= 4;
+  const int barY = top + 4;
+  const int labelY = top + 13;
 
+  // No names. Four characters of alias was recognisable for five agents and
+  // useless for ten, and a strip that only works at small herd sizes is a
+  // strip that stops working exactly when you most need to see the shape of
+  // things. Colour and bar height carry it; the list is one keypress away
+  // for anyone who needs to know which is which.
   for (int i = 0; i < n; i++) {
     const ShepherdAgent& a = g_frame.agents[i];
     const int x = x0 + i * segW;
@@ -650,17 +652,8 @@ void shepherdUiStrip(M5Canvas& spr, int W, int H) {
     // shape carries the state as well as the colour, so the strip still
     // reads at a glance in the dark or to a colourblind eye.
     const bool active = strcmp(a.status, "working") == 0;
-    if (active) spr.fillRect(x + 1, barY, segW - 3, 6, c);
-    else        spr.fillRect(x + 1, barY + 2, segW - 3, 2, c);
-
-    if (labels) {
-      char buf[8];
-      int k = chars < (int)sizeof(buf) - 1 ? chars : (int)sizeof(buf) - 1;
-      strncpy(buf, a.alias, k);
-      buf[k] = 0;
-      spr.setTextColor(a.isDone() ? C_DONE : C_DIM, C_BG);
-      spr.drawString(buf, x + 2, labelY);
-    }
+    if (active) spr.fillRect(x + 1, barY, segW - 3, 7, c);
+    else        spr.fillRect(x + 1, barY + 3, segW - 3, 2, c);
   }
 
   // The right-hand slot carries one of two things, and overflow wins: a
@@ -677,18 +670,6 @@ void shepherdUiStrip(M5Canvas& spr, int W, int H) {
     spr.drawString("Fn+Del", W - 2, labelY);
   }
   spr.setTextDatum(TL_DATUM);
-
-  if (!labels) {
-    // No room for names, so say the shape of it in words instead.
-    char buf[28];
-    const int d = g_frame.doneCount();
-    if (d) snprintf(buf, sizeof(buf), "%d agents, %d done", n, d);
-    else   snprintf(buf, sizeof(buf), "%d agents", n);
-    spr.setTextDatum(MC_DATUM);
-    spr.setTextColor(C_DIM, C_BG);
-    spr.drawString(buf, W / 2, labelY + 3);
-    spr.setTextDatum(TL_DATUM);
-  }
 }
 
 void shepherdUiDraw(M5Canvas& spr, int W, int H) {
