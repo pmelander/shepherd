@@ -833,6 +833,70 @@ This drops CLI spawns from roughly 86,000 per working day to a few hundred, and 
 instant rather than poll-interval bound. The `HerdrSource` seam still stands — it is now one
 implementation using two mechanisms rather than two implementations swapped over time.
 
+
+## T24: measured block rate (2026-09-05)
+
+The one thing the plan asserted without evidence: how often an agent actually blocks. Measured
+rather than assumed, because the device's core event depends on it.
+
+### Every agent is in auto mode
+
+All five live agents report `⏵⏵ auto mode on`, and so did a freshly started agent with default
+settings during probe 2. In auto mode a permission prompt appears only when the classifier declines
+to auto-approve.
+
+### There are no allowlists anywhere
+
+`allowedTools: [0 items]` across **all 39 tracked projects** in `~/.claude.json`. No
+`~/.claude/settings.json`, no `~/.claude/settings.local.json`, no managed settings at
+`ProgramData`. A single stray `settings.local.json` in one repo.
+
+This matters for how the strategic critique lands. The outside voice argued "if Bellwether chirps
+40 times a day, your permission config is wrong". The config is not wrong — it is absent, and auto
+mode is carrying the load. So there is no allowlist-tightening exercise that would make blocks
+rarer; they are already rare.
+
+### Historical rate, from the transcripts
+
+Counting the canonical tool-rejection marker across 297MB of session transcripts in
+`~/.claude/projects`:
+
+| Metric | Value |
+|---|---|
+| Transcript span | 2026-08-11 → 2026-09-05 (25 days) |
+| Sessions | 39 |
+| Tool rejections | 16 total, ~14 organic (2 are this project's own probes) |
+| Sessions with at least one rejection | 12 of 39 (31%) |
+| Organic rejections per day | **~0.56** |
+
+**Limit of the measurement:** this counts *denials*. An approved prompt leaves no distinguishable
+trace in the transcript, so 14 is a lower bound on blocks rather than a count of them. But since a
+prompt only appears in auto mode when the classifier declines, the true figure cannot be far above
+it — single digits per day at the very most, and plausibly around one.
+
+### Consequence: `done` is the real notification event
+
+The pager fires rarely. The glance does not. `working` → `done` transitions happen constantly —
+probe 4 captured two from a single agent inside a 90-second window.
+
+Recall that `done` is not a synonym for `idle`: both are the same readiness state, distinguished by
+whether the tab has been seen in the focused Herdr UI. So `done` means *finished, and you have not
+looked yet*. On a herd of five agents that is the event with daily value, and blocks are the
+dramatic exception rather than the routine case.
+
+Two adjustments follow, neither of which reopens a decision:
+
+1. **`done` earns the loudest glyph on the strip**, and is the state the chirp should fire on by
+   default — with `blocked` louder still. The earlier framing treated `blocked` as the only event
+   worth a sound.
+2. **Queue-first (Issue 12) still stands** as build order, because it remains the fastest route to
+   proving the device works end to end. But the strip is what will get used day to day, so it is a
+   near-term follow-on rather than a someday v2.
+
+This also sharpens what "the device earns its place" means: not "it caught a block from the sofa",
+which will happen roughly once a day, but "I stopped alt-tabbing to find out which of five agents
+had finished".
+
 ## GSTACK REVIEW REPORT
 
 | Review | Trigger | Why | Runs | Status | Findings |
