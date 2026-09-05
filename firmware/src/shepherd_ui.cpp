@@ -288,6 +288,27 @@ ShepherdAlarm shepherdUiTakeAlarm(bool unseen) {
 
 void shepherdUiLock() { g_lock.lock(millis()); }
 
+bool shepherdUiResting() {
+  if (!g_everReceived) return false;
+  // Never rest on a screen that is trying to report a problem. NO SIGNAL and
+  // the version mismatch are the two states where a contented pet would be
+  // an outright lie about what the device knows.
+  if (stale() || g_badVersion) return false;
+  if (!g_lock.locked(millis())) return false;
+  return shepherdUiAttention() == ShepherdAlarm::None;
+}
+
+ShepherdHerd shepherdUiHerd() {
+  ShepherdHerd h{};
+  h.live = g_everReceived && !stale() && !g_badVersion;
+  if (!h.live) return h;
+  h.total = g_frame.count;
+  h.working = g_frame.workingCount();
+  h.blocked = g_frame.blockedCount();
+  h.done = g_frame.doneCount();
+  return h;
+}
+
 // ---------------------------------------------------------------- output
 
 static void drawHeader(M5Canvas& spr, int W) {

@@ -69,3 +69,31 @@ ShepherdAlarm shepherdUiTakeAlarm(bool unseen);
 // Lock the keys immediately, without waiting out the idle window. Called
 // when the screen goes dark.
 void shepherdUiLock();
+
+// Whether Shepherd should stand back and let the buddy have the screen.
+//
+// True when the device is locked and the herd is calm — nothing blocked,
+// nothing newly finished, the relay still talking. That is the moment there
+// is no information worth a dense readout, and it is also the moment you
+// most often look at the thing: you pick it up, the screen lights, and a
+// dense grid of "idle idle idle" tells you nothing a pet does not.
+//
+// Locked is the right trigger rather than merely idle. Locked means nobody
+// is working the device, so the display is decoration; unlocking is the act
+// of asking it a question, and that is when the herd list earns its space.
+// It also means a wake-for-alarm still lands on the queue, because an alarm
+// is never calm.
+bool shepherdUiResting();
+
+// The herd in four numbers, for driving the buddy's mood. Upstream's
+// derive() already asks exactly these questions of its own TamaState; it was
+// simply never given Shepherd's answers, which is why the buddy has spent
+// this whole project reacting to nothing.
+struct ShepherdHerd {
+  bool live;      // a recent frame, and one we understood
+  int total;
+  int working;
+  int blocked;
+  int done;
+};
+ShepherdHerd shepherdUiHerd();

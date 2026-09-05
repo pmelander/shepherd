@@ -132,6 +132,20 @@ struct ShepherdFrame {
     return n;
   }
 
+  int doneCount() const {
+    int n = 0;
+    for (int i = 0; i < count; i++)
+      if (agents[i].isDone()) n++;
+    return n;
+  }
+
+  int workingCount() const {
+    int n = 0;
+    for (int i = 0; i < count; i++)
+      if (strcmp(agents[i].status, "working") == 0) n++;
+    return n;
+  }
+
   // First answerable agent, or -1. The queue is one prompt at a time: you can
   // only answer one question anyway, and keeping it to one keeps the
   // inherited input model intact.

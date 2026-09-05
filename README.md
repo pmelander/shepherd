@@ -155,6 +155,22 @@ eventually type any sequence.
 The screen stays on when locked. This is a glance device; reading the herd without
 touching it is the whole point.
 
+### The buddy
+
+The device is a fork of a tamagotchi, and the pet is not decoration — he is the
+resting state. Lock the device (`Fn`+`Del`, or just let it lock itself) and when the
+herd is calm Shepherd stands back and the buddy has the screen, with one line of
+summary under him. Unlock and the herd list returns.
+
+His mood is the herd: **attention** when an agent is blocked, **celebrate** when one has
+just finished, **busy** when three or more are working, **idle** otherwise. Upstream's
+own `derive()` already asked exactly those questions of a state struct Shepherd had
+never filled in, so for most of this project he was reacting to zeroes.
+
+He does not appear when the relay is unreachable. A contented pet is allowed to mean
+"all calm"; it is never allowed to mean "I cannot see", so a stale link still gets
+`NO SIGNAL`.
+
 ### The buddy's own screens
 
 Shepherd owns the display once it has ever had a frame, but the inherited firmware's

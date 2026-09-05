@@ -1262,10 +1262,19 @@ void drawPet() {
 }
 
 void drawHUD() {
-  // Shepherd owns the screen once it has ever had a frame. Standing aside
-  // when the link goes quiet would hand the display back to the buddy, which
-  // would cheerfully draw an idle pet while the herd's real state is unknown.
-  if (shepherdUiActive()) { shepherdUiDraw(spr, W, H); return; }
+  // Shepherd owns the screen once it has ever had a frame — EXCEPT while
+  // resting, when it hands the display to the buddy and keeps only the
+  // bottom line for a herd summary.
+  //
+  // Standing aside when the link goes quiet is a different thing and is
+  // still forbidden: shepherdUiResting() is false when stale, so a lost
+  // relay draws NO SIGNAL rather than a cheerful pet over an unknown herd.
+  // The pet is allowed to mean "all calm"; it is never allowed to mean
+  // "I cannot see".
+  if (shepherdUiActive() && !shepherdUiResting()) {
+    shepherdUiDraw(spr, W, H);
+    return;
+  }
   if (tama.promptId[0]) { drawApproval(); return; }
   const Palette& p = characterPalette();
   const int SHOW = 3, LH = 8, WIDTH = 21;
@@ -1413,6 +1422,28 @@ void loop() {
 #endif
 
   dataPoll(&tama);
+  // Give the buddy the herd. derive() below already asks exactly these
+  // questions — is anything waiting, did something just finish, how many are
+  // running — of a TamaState that upstream filled from its own desktop app
+  // and Shepherd never touched. So the pet has spent this entire project
+  // reacting to a struct of zeroes. Four assignments make it mean something.
+  if (shepherdUiActive()) {
+    ShepherdHerd h = shepherdUiHerd();
+    tama.connected         = h.live;
+    tama.sessionsTotal     = (uint8_t)h.total;
+    tama.sessionsRunning   = (uint8_t)h.working;
+    tama.sessionsWaiting   = (uint8_t)h.blocked;
+    tama.recentlyCompleted = h.done > 0;
+    tama.nLines            = 0;   // one centred line, not a transcript
+    tama.lastUpdated       = now;
+    if (!h.live)            snprintf(tama.msg, sizeof(tama.msg), "no signal");
+    else if (h.blocked)     snprintf(tama.msg, sizeof(tama.msg), "%d blocked", h.blocked);
+    else if (h.done)        snprintf(tama.msg, sizeof(tama.msg), "%d done", h.done);
+    else if (h.working)     snprintf(tama.msg, sizeof(tama.msg), "%d working", h.working);
+    else if (h.total)       snprintf(tama.msg, sizeof(tama.msg), "%d idle", h.total);
+    else                    snprintf(tama.msg, sizeof(tama.msg), "no agents");
+  }
+
   if (statsPollLevelUp()) triggerOneShot(P_CELEBRATE, 3000);
   baseState = derive(tama);
 
@@ -1748,7 +1779,14 @@ void loop() {
   clockRefreshRtc();   // 1Hz internal throttle; also caches _onUsb
   // Show the clock when nothing is happening — bridge heartbeat alone
   // doesn't count as activity (it's the only way to get the RTC synced).
-  bool clocking = displayMode == DISP_NORMAL
+  // Not while Shepherd is on duty. This condition reads "nothing is running
+  // and nothing is waiting", which was trivially true for the entire project
+  // so far because nobody was filling those fields — feeding them from the
+  // herd arms a clock face that draws BEFORE drawHUD in the dispatch, and so
+  // would have quietly hidden Shepherd and the buddy both whenever the herd
+  // went calm on USB power. The clock stays for a device with no relay.
+  bool clocking = !shepherdUiActive()
+               && displayMode == DISP_NORMAL
                && !menuOpen && !settingsOpen && !resetOpen && !inPrompt
                && tama.sessionsRunning == 0 && tama.sessionsWaiting == 0
                && dataRtcValid() && _onUsb;

@@ -206,6 +206,34 @@ void test_blocked_and_done_are_both_found_so_the_caller_can_rank_them(void) {
     TEST_ASSERT_EQUAL(1, f.firstShowable());
 }
 
+void test_the_herd_can_be_counted_by_state(void) {
+    // These feed the buddy. Upstream's derive() already asks exactly the
+    // questions Shepherd can answer - is anything waiting, did something just
+    // finish, how many are running - it was simply never given the numbers.
+    const char* line =
+      "{\"t\":\"snap\",\"v\":2,\"a\":["
+      "{\"i\":\"w1:p1\",\"n\":\"a\",\"s\":\"working\"},"
+      "{\"i\":\"w2:p1\",\"n\":\"b\",\"s\":\"working\"},"
+      "{\"i\":\"w3:p1\",\"n\":\"c\",\"s\":\"done\"},"
+      "{\"i\":\"w4:p1\",\"n\":\"d\",\"s\":\"idle\"},"
+      "{\"i\":\"w5:p1\",\"n\":\"e\",\"s\":\"blocked\",\"q\":\"ok?\",\"r\":\"r5\"}]}";
+    TEST_ASSERT_EQUAL(SHEPHERD_OK, shepherdParse(line, &f));
+    TEST_ASSERT_EQUAL(5, f.count);
+    TEST_ASSERT_EQUAL(2, f.workingCount());
+    TEST_ASSERT_EQUAL(1, f.doneCount());
+    TEST_ASSERT_EQUAL(1, f.blockedCount());
+}
+
+void test_counting_an_empty_or_degraded_herd_is_all_zeroes(void) {
+    // A degraded frame marks everything unknown, which is none of the three.
+    const char* line = "{\"t\":\"snap\",\"v\":2,\"why\":\"gone\",\"a\":["
+                       "{\"i\":\"w1:p1\",\"n\":\"a\",\"s\":\"unknown\"}]}";
+    TEST_ASSERT_EQUAL(SHEPHERD_OK, shepherdParse(line, &f));
+    TEST_ASSERT_EQUAL(0, f.workingCount());
+    TEST_ASSERT_EQUAL(0, f.doneCount());
+    TEST_ASSERT_EQUAL(0, f.blockedCount());
+}
+
 // -------------------------------------------------------- recap + elapsed
 
 void test_the_recap_and_its_timestamp_are_parsed(void) {
@@ -454,6 +482,8 @@ int main(int, char**) {
     RUN_TEST(test_first_answerable_walks_the_queue);
     RUN_TEST(test_showable_includes_the_ones_you_cannot_answer);
     RUN_TEST(test_done_is_found_separately_from_blocked);
+    RUN_TEST(test_the_herd_can_be_counted_by_state);
+    RUN_TEST(test_counting_an_empty_or_degraded_herd_is_all_zeroes);
     RUN_TEST(test_idle_is_not_done_and_must_never_ring);
     RUN_TEST(test_blocked_and_done_are_both_found_so_the_caller_can_rank_them);
     RUN_TEST(test_the_recap_and_its_timestamp_are_parsed);
