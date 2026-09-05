@@ -33,6 +33,15 @@ bool shepherdUiActive();
 // Draw into the shared sprite. Caller flushes.
 void shepherdUiDraw(M5Canvas& spr, int W, int H);
 
+// Tell Shepherd whether it is what the viewer is actually looking at.
+//
+// shepherdUiActive() only says "a frame has arrived at some point", which is
+// not the same thing: the buddy's info screen and its modals draw OVER
+// Shepherd, and while one of them is up Shepherd must not be taking keys.
+// Called from the draw dispatch, so this tracks whatever that decides rather
+// than a second copy of the same conditions drifting out of step.
+void shepherdUiOnScreen(bool visible);
+
 // Handle one key. Returns true when Shepherd consumed it.
 bool shepherdUiKey(HalKey k);
 

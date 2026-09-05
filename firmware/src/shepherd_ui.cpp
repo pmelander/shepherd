@@ -91,6 +91,7 @@ static uint32_t g_noteUntil = 0;
 // out from under someone reading it. Only a genuinely NEW prompt does that.
 enum class ShepherdView : uint8_t { Auto, List, Detail };
 static ShepherdView g_view = ShepherdView::Auto;
+static bool g_onScreen = false;   // set by the draw dispatch each frame
 
 static int g_listSel = 0;         // highlighted row in the herd list
 static int g_listTop = 0;         // first visible row, for scrolling
@@ -668,19 +669,28 @@ static void requestDetail(const ShepherdAgent& a, uint32_t now) {
   sendAct(a, "detail");
 }
 
+void shepherdUiOnScreen(bool visible) { g_onScreen = visible; }
+
 bool shepherdUiKey(HalKey k) {
   if (!shepherdUiActive()) return false;
 
   const uint32_t now = millis();
 
-  // The chord is handled before the version and staleness gates, so it still
-  // works on a screen that is refusing to render anything else. Being unable
-  // to unlock a NO SIGNAL device would mean waiting out a reconnect with a
-  // dead keyboard.
+  // The chord is handled before every other gate - version, staleness, and
+  // whether Shepherd is even the thing being drawn - so it still works on a
+  // screen refusing to render anything else. Being unable to unlock a NO
+  // SIGNAL device would mean waiting out a reconnect with a dead keyboard.
   if (k == HalKey::Unlock) {
     note(g_lock.toggle(now) ? "locked" : "unlocked");
     return true;
   }
+
+  // Not on screen, not our keys. Without this, Shepherd went on eating
+  // input while the buddy's info screen or a modal was up: `y` approved a
+  // prompt the reader could not see, which is precisely the invariant the
+  // whole action gate exists to protect, and Enter was swallowed so the
+  // usual way back out of the info screen did not work either.
+  if (!g_onScreen) return false;
   // Every key, not only the two that send. Navigating the herd in a pocket
   // is harmless in itself, but it moves the selection - so you would unlock
   // to answer and find the cursor somewhere other than where you left it,

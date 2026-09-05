@@ -155,6 +155,27 @@ eventually type any sequence.
 The screen stays on when locked. This is a glance device; reading the herd without
 touching it is the whole point.
 
+### The buddy's own screens
+
+Shepherd owns the display once it has ever had a frame, but the inherited firmware's
+screens are still under there and still reachable:
+
+| Want | Do |
+|---|---|
+| Menu (settings, pet, buttons, credits, power off) | `m` |
+| Info screen — battery, BLE, button map, credits | `m`, then **buttons** or **credits** |
+| Back to Shepherd from the info screen | `enter` cycles the display mode round |
+| Settings — brightness, sound, LED, clock rotation | `m`, then **settings** |
+
+Two things that will trip you up. **Unlock first** (`Fn`+`Del`) — the lock swallows `m`
+along with everything else, and since the device locks itself whenever the screen sleeps
+it is usually locked when you pick it up. And `m` does nothing on the **recap** screen,
+which deliberately swallows every key so a stray press cannot act on a queue you are not
+looking at; press `del` back to the list first.
+
+Sound and LED are the buddy's settings, so Shepherd's alarm honours them: turning sound
+off in that menu silences the chirp but leaves the screen and the LED working.
+
 ## Security model
 
 The threat is not a determined attacker with a radio. It is that this thing can press

@@ -1834,15 +1834,20 @@ void loop() {
   if (landscapeClock) {
     drawClock();
   } else if (!napping && !screenOff) {
+    bool shepDrew = false;
     if (blePasskey()) drawPasskey();
     else if (clocking) drawClock();
     else if (displayMode == DISP_INFO) drawInfo();
     else if (displayMode == DISP_PET) drawPet();
     else if (petPickerOpen) drawPetPicker();   // thin hint bar + live pet above
-    else if (settings().hud) drawHUD();
+    else if (settings().hud) { drawHUD(); shepDrew = shepherdUiActive(); }
     if (resetOpen) drawReset();
     else if (settingsOpen) drawSettings();
     else if (menuOpen) drawMenu();
+    // Keys follow the screen. The three modals above draw OVER drawHUD, so
+    // Shepherd is not what you are looking at while one is open even though
+    // it painted underneath.
+    shepherdUiOnScreen(shepDrew && !resetOpen && !settingsOpen && !menuOpen);
     spr.pushSprite(0, 0);
   }
 
