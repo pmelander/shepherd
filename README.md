@@ -158,9 +158,20 @@ touching it is the whole point.
 ### The buddy
 
 The device is a fork of a tamagotchi, and the pet is not decoration — he is the
-resting state. Lock the device (`Fn`+`Del`, or just let it lock itself) and when the
-herd is calm Shepherd stands back and the buddy has the screen, with one line of
-summary under him. Unlock and the herd list returns.
+resting state. Lock the device (`Fn`+`Del`, or just let it lock itself) and unless
+something is blocked, Shepherd stands back: the buddy gets the screen, with the herd
+along the bottom as one coloured segment per agent. Unlock and the list returns.
+
+```
+              ( o.o )              <- mood follows the herd
+               /|_|      ▂▂▂▂   ▂▂▂▂   ▂▂▂▂   ▂▂▂▂    <- solid = working, thin = at rest
+     newpr   elasm   tempc   agent      green = finished, unseen
+```
+
+Segments share the width evenly and stop growing at 40px, so two agents read as two
+agents rather than as a progress bar. Names drop out below four characters rather than
+degrading into initials — a count takes their place. A thirteenth agent shows as `+1`,
+because the one screen meant to show all of them must not silently show twelve.
 
 His mood is the herd: **attention** when an agent is blocked, **celebrate** when one has
 just finished, **busy** when three or more are working, **idle** otherwise. Upstream's

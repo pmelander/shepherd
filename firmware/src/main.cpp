@@ -1271,8 +1271,14 @@ void drawHUD() {
   // relay draws NO SIGNAL rather than a cheerful pet over an unknown herd.
   // The pet is allowed to mean "all calm"; it is never allowed to mean
   // "I cannot see".
-  if (shepherdUiActive() && !shepherdUiResting()) {
-    shepherdUiDraw(spr, W, H);
+  if (shepherdUiActive()) {
+    if (shepherdUiResting()) {
+      // The buddy keeps everything the pet renderer already drew; Shepherd
+      // takes only the bottom band, which upstream's own HUD clears anyway.
+      shepherdUiStrip(spr, W, H);
+    } else {
+      shepherdUiDraw(spr, W, H);
+    }
     return;
   }
   if (tama.promptId[0]) { drawApproval(); return; }

@@ -85,6 +85,15 @@ void shepherdUiLock();
 // is never calm.
 bool shepherdUiResting();
 
+// Draw the resting strip: one coloured segment per agent along the bottom,
+// with the buddy left alone above it. Only called while resting.
+//
+// This is the five-glyph strip the design doc drew and then cut to v2. It
+// came back because the buddy needed something to sit above: a pet with no
+// data is a screensaver, and a list with no pet is what you already have on
+// the laptop.
+void shepherdUiStrip(M5Canvas& spr, int W, int H);
+
 // The herd in four numbers, for driving the buddy's mood. Upstream's
 // derive() already asks exactly these questions of its own TamaState; it was
 // simply never given Shepherd's answers, which is why the buddy has spent

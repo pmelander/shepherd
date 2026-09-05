@@ -295,7 +295,11 @@ bool shepherdUiResting() {
   // an outright lie about what the device knows.
   if (stale() || g_badVersion) return false;
   if (!g_lock.locked(millis())) return false;
-  return shepherdUiAttention() == ShepherdAlarm::None;
+  // Blocked, not "anything at all". A finished agent is exactly what the pet
+  // has a celebrate animation for, and the strip shows which one in green —
+  // "one of them finished" does not need a dense list to say. Blocked does:
+  // there is a question on screen and two keys that answer it.
+  return g_frame.firstShowable() < 0;
 }
 
 ShepherdHerd shepherdUiHerd() {
@@ -601,6 +605,89 @@ static void drawQueue(M5Canvas& spr, int W, int H, int idx) {
     // without it the herd list is unreachable exactly when the device is
     // most worth looking at.
     spr.drawString("[y]ok [n]no [>]next [del]list", 6, H - 11);
+  }
+}
+
+// Height of the strip band. Matches the HUD area upstream already clears at
+// the bottom of the sprite, so the pet above it is untouched.
+#define SH_STRIP_H 28
+
+void shepherdUiStrip(M5Canvas& spr, int W, int H) {
+  const int top = H - SH_STRIP_H;
+  spr.fillRect(0, top, W, SH_STRIP_H, C_BG);
+  spr.drawFastHLine(0, top, W, 0x2104);
+  spr.setTextSize(1);
+  spr.setTextDatum(TL_DATUM);
+
+  const int n = g_frame.count;
+  if (n <= 0) {
+    spr.setTextDatum(MC_DATUM);
+    spr.setTextColor(C_DIM, C_BG);
+    spr.drawString(g_frame.degraded ? g_frame.why : "no agents", W / 2, H - 14);
+    spr.setTextDatum(TL_DATUM);
+    return;
+  }
+
+  // Segments share the width evenly, but stop growing at 40px: two agents
+  // stretched across a 240px screen reads as a progress bar, not a herd.
+  int segW = (W - 8) / n;
+  if (segW > 40) segW = 40;
+  if (segW < 6) segW = 6;
+  const int x0 = (W - segW * n) / 2;
+  const int barY = top + 5;
+  const int labelY = top + 15;
+  // 6px per glyph, and leave a gap: below four characters an alias is not
+  // recognisable enough to be worth the row, so the labels drop out entirely
+  // rather than becoming a line of initials.
+  const int chars = (segW - 4) / 6;
+  const bool labels = chars >= 4;
+
+  for (int i = 0; i < n; i++) {
+    const ShepherdAgent& a = g_frame.agents[i];
+    const int x = x0 + i * segW;
+    const uint16_t c = statusColour(a);
+    // A working agent gets a solid bar, anything at rest a thin one. The
+    // shape carries the state as well as the colour, so the strip still
+    // reads at a glance in the dark or to a colourblind eye.
+    const bool active = strcmp(a.status, "working") == 0;
+    if (active) spr.fillRect(x + 1, barY, segW - 3, 6, c);
+    else        spr.fillRect(x + 1, barY + 2, segW - 3, 2, c);
+
+    if (labels) {
+      char buf[8];
+      int k = chars < (int)sizeof(buf) - 1 ? chars : (int)sizeof(buf) - 1;
+      strncpy(buf, a.alias, k);
+      buf[k] = 0;
+      spr.setTextColor(a.isDone() ? C_DONE : C_DIM, C_BG);
+      spr.drawString(buf, x + 2, labelY);
+    }
+  }
+
+  // The right-hand slot carries one of two things, and overflow wins: a
+  // thirteenth agent going unmentioned on the one screen meant to show all of
+  // them is worse than an undiscoverable keystroke.
+  spr.setTextDatum(TR_DATUM);
+  if (g_frame.more) {
+    char buf[8];
+    snprintf(buf, sizeof(buf), "+%d", g_frame.more);
+    spr.setTextColor(C_DIM, C_BG);
+    spr.drawString(buf, W - 2, labelY);
+  } else if (g_lock.locked(millis())) {
+    spr.setTextColor(C_LOCK, C_BG);
+    spr.drawString("Fn+Del", W - 2, labelY);
+  }
+  spr.setTextDatum(TL_DATUM);
+
+  if (!labels) {
+    // No room for names, so say the shape of it in words instead.
+    char buf[28];
+    const int d = g_frame.doneCount();
+    if (d) snprintf(buf, sizeof(buf), "%d agents, %d done", n, d);
+    else   snprintf(buf, sizeof(buf), "%d agents", n);
+    spr.setTextDatum(MC_DATUM);
+    spr.setTextColor(C_DIM, C_BG);
+    spr.drawString(buf, W / 2, labelY + 3);
+    spr.setTextDatum(TL_DATUM);
   }
 }
 
