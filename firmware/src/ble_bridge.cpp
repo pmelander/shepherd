@@ -80,7 +80,26 @@ class ServerCallbacks : public BLEServerCallbacks {
 // encrypted, which the status ack reports as bleSecure().
 class SecCallbacks : public BLESecurityCallbacks {
   uint32_t onPassKeyRequest() override { return 0; }
-  bool onConfirmPIN(uint32_t) override { return false; }
+  bool onConfirmPIN(uint32_t pin) override {
+    // Under the upstream passkey build this is a can't-happen stub and
+    // returning false is harmless. Under Just Works it is the opposite: the
+    // stack calls this to confirm the pairing, so false REJECTS the bond and
+    // the central sees "Could not pair with device: FAILED" followed by
+    // ERROR_CANCELED on the first encrypted operation.
+    //
+    // There is no human to compare a number with when the peripheral has no
+    // display in use, so accepting is the only meaningful answer. MITM
+    // protection is not what is guarding this link — the app-layer HMAC and
+    // the relay's closed action set are.
+#ifdef BELLWETHER_BLE_PASSKEY
+    (void)pin;
+    return false;
+#else
+    Serial.printf("[ble] confirm %06lu -> accept (just works)\n",
+                  (unsigned long)pin);
+    return true;
+#endif
+  }
   bool onSecurityRequest() override { return true; }
   void onPassKeyNotify(uint32_t pk) override {
     passkey = pk;
