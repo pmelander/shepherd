@@ -750,13 +750,88 @@ present. Record the Claude Code version in the audit log, because the option set
   CLI reads do not mark a tab seen. For a glance device that is more actionable than `idle`, so
   `done` earns its own glyph rather than sharing one.
 
-### Remaining probes
+### Probe 3: socket surfaces — PASS
 
-3. Verify `agent read --source detection` output shape at scale, the manifest startup hook contract,
-   and `HERDR_ENV` inheritance in a hook-spawned process. (`agent read --source detection`,
-   `agent send-keys`, `agent prompt --wait` and `workspace create/close` are all now exercised and
-   behave as assumed.)
-4. Does `pane_agent_status_changed` fire? Tunes polling; gates nothing.
+Exercised and behaving as assumed: `agent read --source detection`, `agent send-keys`,
+`agent prompt --wait`, `workspace create` / `close`, `agent list`, `agent get`.
+
+The named-pipe path is validated end to end **from stdlib Python, no pywin32**:
+
+```python
+open(r"\\.\pipe\C:\Users\<u>\AppData\Roaming\herdr\herdr.sock", "r+b", buffering=0)
+```
+
+Request envelope is `{"id", "method", "params"}`, newline-delimited. Errors return
+`{"error": {"code", "message"}}` with a parse column offset. `events.subscribe` acks with
+`{"result": {"type": "subscription_started"}}`.
+
+Still unverified: the manifest startup-hook contract and whether a hook-spawned process inherits
+`HERDR_ENV`. Both are settled by writing the manifest, which is task T15.
+
+### Probe 4: does the status event fire? — PASS, with an architectural catch
+
+**It fires on 0.8.2.** Observed live, with this session's own pane as the trigger:
+
+```
+16:50:23  PUSHED  pane.agent_status_changed | wA:p1 | done
+16:51:34  PUSHED  pane.agent_status_changed | wA:p1 | working
+```
+
+```json
+{"event": "pane.agent_status_changed",
+ "data": {"agent": "claude", "agent_status": "done",
+          "pane_id": "wA:p1", "workspace_id": "wA"}}
+```
+
+herdr-assist's "0.8.0 does not emit it" is real but stale; `lfsmoura/led-agent-status` was right.
+
+**There is a fourth naming surface, and the push channel is dotted.** Correcting the table at the
+top of this document:
+
+| Surface | Field | Spelling |
+|---|---|---|
+| `events.subscribe` | `params.subscriptions[].type` | **dotted** |
+| `events.wait` | `params.match_event.event` | underscored |
+| the `event` schema record | `type` const | underscored |
+| **the push envelope** | `event` (alongside `data`) | **dotted** |
+
+Only **three** kinds actually stream (`SubscriptionEventKind`): `pane.output_matched`,
+`pane.agent_status_changed`, `pane.scroll_changed`.
+
+**The catch, and it decides the architecture.** The subscription is **per-pane, not global**:
+
+```json
+"pane.agent_status_changed": {
+  "required": ["type", "pane_id"],
+  "properties": {"pane_id": {...}, "agent_status": {"...optional filter..."}}}
+```
+
+Three consequences:
+
+1. The relay must enumerate panes before it can subscribe to anything, and re-subscribe whenever
+   membership changes.
+2. **New-agent discovery has no push path.** `pane.agent_detected` does not stream, so polling
+   `agent list` is permanent, not a stopgap.
+3. The optional `agent_status` filter means Herdr can push **only** transitions into `blocked` —
+   exactly the event the device exists for, filtered at the source.
+
+The push payload is also thin: `agent`, `agent_status`, `pane_id`, `workspace_id` and nothing else.
+No `state_change_seq`, no `cwd`, no `terminal_title_stripped`. It tells you *which pane changed and
+to what*, not enough to render a row.
+
+### Revised: HerdrSource is poll-plus-push (supersedes the CLI-first decision)
+
+The schema forces a hybrid, so the earlier "CLI now, named pipe later behind the seam" is void.
+One `HerdrSource` does both:
+
+- **`herdr agent list` every ~30s** for membership and display metadata (names, cwd), and to detect
+  agents that appeared or vanished. Re-subscribe on any membership change.
+- **One `pane.agent_status_changed` subscription per pane** over the named pipe, with
+  `agent_status` filtered to `blocked`, for the transition that matters.
+
+This drops CLI spawns from roughly 86,000 per working day to a few hundred, and makes the chirp
+instant rather than poll-interval bound. The `HerdrSource` seam still stands — it is now one
+implementation using two mechanisms rather than two implementations swapped over time.
 
 ## GSTACK REVIEW REPORT
 
