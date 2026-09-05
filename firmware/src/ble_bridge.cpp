@@ -66,10 +66,18 @@ class ServerCallbacks : public BLEServerCallbacks {
   }
 };
 
-// LE Secure Connections, passkey-entry: we are DisplayOnly, the central
-// is KeyboardOnly. The stack picks a random 6-digit passkey, calls
-// onPassKeyNotify here, and the user types it on the desktop. main.cpp
-// polls blePasskey() to render it.
+// Pairing mode is a build-time choice. See BELLWETHER_BLE_PASSKEY below.
+//
+// Upstream default (BELLWETHER_BLE_PASSKEY defined): LE Secure Connections
+// with passkey entry. We are DisplayOnly, the central is KeyboardOnly. The
+// stack picks a random 6-digit passkey, calls onPassKeyNotify here, and the
+// user types it on the desktop. main.cpp polls blePasskey() to render it.
+// This is the stronger mode and it is kept intact.
+//
+// Bellwether default (flag undefined): Just Works. The callbacks below stay
+// wired either way — onPassKeyNotify simply never fires under Just Works,
+// and onAuthenticationComplete still reports whether the link came up
+// encrypted, which the status ack reports as bleSecure().
 class SecCallbacks : public BLESecurityCallbacks {
   uint32_t onPassKeyRequest() override { return 0; }
   bool onConfirmPIN(uint32_t) override { return false; }
@@ -91,7 +99,13 @@ void bleInit(const char* deviceName) {
   // Request the biggest MTU we can get. macOS negotiates to 185 typically.
   BLEDevice::setMTU(517);
 
+  // MITM protection requires a pairing ceremony the Windows central cannot
+  // perform — see the BELLWETHER_BLE_PASSKEY block further down for why.
+#ifdef BELLWETHER_BLE_PASSKEY
   BLEDevice::setEncryptionLevel(ESP_BLE_SEC_ENCRYPT_MITM);
+#else
+  BLEDevice::setEncryptionLevel(ESP_BLE_SEC_ENCRYPT);
+#endif
   BLEDevice::setSecurityCallbacks(new SecCallbacks());
 
   server = BLEDevice::createServer();
@@ -118,8 +132,33 @@ void bleInit(const char* deviceName) {
   svc->start();
 
   BLESecurity* sec = new BLESecurity();
+#ifdef BELLWETHER_BLE_PASSKEY
+  // Upstream mode. DisplayOnly peripheral + 6-digit passkey on screen.
+  // Requires a central that can run a passkey-entry ceremony.
   sec->setAuthenticationMode(ESP_LE_AUTH_REQ_SC_MITM_BOND);
   sec->setCapability(ESP_IO_CAP_OUT);
+#else
+  // Bellwether default: LE Secure Connections, Just Works, still bonded and
+  // still encrypted — only MITM protection is given up.
+  //
+  // This is forced by the central, not chosen for convenience. Bellwether's
+  // relay uses bleak, whose WinRT backend hardcodes
+  //   ceremony = DevicePairingKinds.CONFIRM_ONLY
+  // and whose PairingRequested handler calls args.accept() unconditionally
+  // (bleak/backends/winrt/client.py:523-524). A DisplayOnly peripheral that
+  // requires MITM simply cannot pair with it.
+  //
+  // What replaces MITM: every action frame carries an app-layer
+  // HMAC-SHA256(secret, ...) that the relay verifies, and the relay accepts
+  // only a closed set of actions against a pane it actually rendered. A
+  // hostile peer that manages to bond still cannot make anything happen.
+  //
+  // To restore MITM: define BELLWETHER_BLE_PASSKEY and move the central to
+  // .NET/WinRT DeviceInformationCustomPairing with a ProvidePin handler.
+  // Nothing else needs to change; that is why this is a flag.
+  sec->setAuthenticationMode(ESP_LE_AUTH_REQ_SC_BOND);
+  sec->setCapability(ESP_IO_CAP_NONE);
+#endif
   sec->setKeySize(16);
   sec->setInitEncryptionKey(ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK);
   sec->setRespEncryptionKey(ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK);
