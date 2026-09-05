@@ -36,10 +36,12 @@ plan: ADV bring-up, and writing a BLE stack from scratch.
 
 ## Known upstream quirks, carried as-is
 
-- **`-DBOARD_HAS_PSRAM` is set on the `cardputer-adv` env.** The ADV's StampS3A is an
-  **ESP32-S3FN8** — 8MB flash, no PSRAM (PSRAM parts carry an R2/R8 suffix). This flag looks
-  wrong. Left untouched in the pristine drop; verify on first flash before changing it, since
-  the board may boot fine either way and a blind edit would be guessing.
+- **`-DBOARD_HAS_PSRAM` was set on the `cardputer-adv` env — removed, with evidence.** esptool
+  against the real board reports `Chip is ESP32-S3 (QFN56) (revision v0.2)` and
+  `Features: WiFi, BLE, Embedded Flash 8MB (XMC)` — no PSRAM. The flag is wrong for ADV
+  hardware. It is **not** fatal: the board boots and advertises with it set, so it was not the
+  cause of the first-flash silence (that was needing a power cycle out of download mode). It is
+  removed because it is untrue, not because it broke anything.
 - Upstream's counterpart is the **Claude desktop app's BLE API**, which speaks a semantic
   approve/deny. Bellwether's counterpart is a relay injecting keystrokes into a Herdr pane, so
   the data model diverges — upstream's protocol is aggregate-only
