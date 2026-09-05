@@ -40,6 +40,11 @@ from shepherd.auth import (
 from shepherd.frame import FrameBuilder
 from shepherd.herdr import CliHerdrSource, herdr_binary
 from shepherd.runner import Runner, watch_herdr
+from shepherd.singleton import AlreadyRunning, acquire
+
+# Long enough to cover the outgoing relay's 5s watchdog poll and its BLE
+# teardown, short enough that a genuinely duplicated relay says so promptly.
+HANDOVER_WAIT = 20.0
 from shepherd.transport import BleTransport
 
 HERE = Path(__file__).resolve().parent
@@ -131,6 +136,20 @@ async def serve() -> int:
     STATE.mkdir(parents=True, exist_ok=True)
     logging.info("shepherd starting; herdr=%s state=%s", herdr_binary(), STATE)
 
+    # One relay, one Cardputer. A second one does not fail loudly - it sits in
+    # the reconnect backoff saying the device is not advertising, because the
+    # first one is holding the link. Exiting 0 rather than erroring: the job
+    # is being done, just not by us, and a red plugin log would be misleading.
+    try:
+        # Waits out a departing relay rather than losing to it. On a Herdr
+        # restart the previous session's relay is still alive for up to one
+        # watchdog poll; refusing to start here would leave the new session
+        # with nothing.
+        lock = acquire(wait=HANDOVER_WAIT)
+    except AlreadyRunning as e:
+        logging.warning("not starting: %s", e)
+        return 0
+
     runner = Runner()
     loop = asyncio.get_running_loop()
 
@@ -154,6 +173,7 @@ async def serve() -> int:
         watchdog.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await watchdog
+        lock.close()
     logging.info("shepherd stopped")
     return 0
 

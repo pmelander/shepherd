@@ -119,7 +119,23 @@ physical reset button.
 herdr plugin link C:\path\to\herdr-remote\plugin
 ```
 
-The relay then starts with each Herdr session and exits with it.
+The relay then starts with each Herdr session and holds the BLE link for as long as the
+session lasts. Two things make that safe to leave on:
+
+- **One relay at a time.** It takes an OS file lock, so a copy left running by hand does
+  not fight the session-started one for the single Cardputer. The loser exits 0 and says
+  why. This matters more than it sounds: a second relay does not fail loudly, it sits in
+  the reconnect backoff insisting the device is not advertising — because the first one
+  is holding the link — and that message points at the radio, the pairing, the firmware,
+  everywhere except the other copy of itself.
+- **It exits with the session.** Herdr does *not* kill plugin startup processes when a
+  session stops, verified by stopping one and finding the relay still running afterwards.
+  So the relay watches `HERDR_SOCKET_PATH` and stops itself. An incoming relay waits up
+  to 20s for a departing one to let go, because the new session's hook fires before the
+  old relay's watchdog has noticed.
+
+To run one by hand instead — for debugging — stop the Herdr-started one first, or the
+lock will (correctly) refuse you.
 
 ## Using it
 

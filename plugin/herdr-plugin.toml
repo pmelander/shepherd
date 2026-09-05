@@ -1,9 +1,8 @@
 # Shepherd — a BLE pocket herd radio for Herdr.
 #
-# This manifest currently declares the probe-3 skeleton: it exists to answer
-# "does a hook-spawned process inherit HERDR_ENV and the caller context vars?"
-# The same entrypoint becomes the relay (HerdrSource + BLE central) once that
-# is settled.
+# The relay: reads the herd, pushes a snapshot to a paired Cardputer ADV over
+# Nordic UART, and answers the blocked agent the device says to answer. See
+# ../README.md for the security model and the setup order.
 #
 # Interpreter note (verified on this host, 2026-09-05): do NOT use "python3"
 # on Windows. It resolves to the Microsoft Store app-execution alias stub,
@@ -14,18 +13,42 @@
 
 id = "shepherd"
 name = "Shepherd"
-version = "0.0.1"
+version = "0.1.0"
 min_herdr_version = "0.8.0"
 description = "Per-agent Herdr state on a Cardputer ADV over BLE. Glance, chirp, approve."
 platforms = ["windows"]
 
-# Fires when the Herdr session starts. Herdr owns the lifecycle and restarts,
-# and failures land in `herdr plugin log list --plugin shepherd`.
+# Fires when the Herdr session starts, and holds the BLE link for as long as
+# the session lasts. Failures land in `herdr plugin log list --plugin shepherd`.
+#
+# Two things make this safe to leave on:
+#
+#   * The relay takes an OS file lock, so a copy left running by hand does not
+#     end up fighting a session-started one for the single Cardputer. The
+#     loser exits 0 and says why — a second relay otherwise sits in the
+#     reconnect backoff insisting the device is not advertising, which points
+#     at the radio instead of at itself.
+#
+#   * It watches HERDR_SOCKET_PATH and exits when the session ends or is
+#     replaced. Herdr does NOT kill plugin startup processes on session stop
+#     — verified by stopping a test session and finding the relay still
+#     running — so without that, every restart would leave another orphan.
 [[startup]]
 command = ["py", "-3", "start.py", "--mode", "startup"]
 
-# Same entrypoint, invocable on demand. Lets the environment be captured
-# without waiting for a server restart, and later becomes the relay restart.
+# Print the PlatformIO flag that pairs this relay's secret with a firmware
+# build, generating the secret on first run. An action rather than a README
+# paragraph because resolving the config directory by hand is how you end up
+# with two secrets and a device whose every action is refused.
+[[actions]]
+id = "secret-flag"
+title = "Shepherd: print the firmware secret flag"
+contexts = ["global"]
+command = ["py", "-3", "start.py", "--secret-flag"]
+
+# Dump the environment Herdr injects. Kept from bring-up: when the relay
+# misbehaves under Herdr but works by hand, the difference is almost always
+# in here — HERDR_PLUGIN_CONFIG_DIR and HERDR_PLUGIN_STATE_DIR especially.
 [[actions]]
 id = "probe-env"
 title = "Shepherd: dump plugin environment"
