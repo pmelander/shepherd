@@ -12,6 +12,7 @@ whole point of that path.
     py -3 start.py                 # run the relay
     py -3 start.py --probe-env     # dump the injected environment and exit
     py -3 start.py --once          # one frame to the device, then exit
+    py -3 start.py --secret-flag   # the build flag firmware/secret.ini needs
 """
 
 from __future__ import annotations
@@ -30,6 +31,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from shepherd.auth import (
+    SECRET_FILENAME,
+    build_flag,
+    config_dir,
+    load_or_create_secret,
+)
 from shepherd.frame import FrameBuilder
 from shepherd.herdr import CliHerdrSource, herdr_binary
 from shepherd.runner import Runner, watch_herdr
@@ -76,6 +83,27 @@ def probe_env() -> int:
         "herdr_binary": herdr_binary(),
     }
     print(json.dumps(record, ensure_ascii=False, indent=1))
+    return 0
+
+
+def secret_flag() -> int:
+    """Print the PlatformIO flag that pairs this relay with a firmware build.
+
+    Exists because doing this by hand is how you end up with two secrets.
+    The relay reads its secret from HERDR_PLUGIN_CONFIG_DIR when Herdr
+    injected one and from ~/.shepherd when it did not, so generating a key in
+    the wrong place and building against it produces a device that pairs,
+    connects, draws the herd perfectly, and has every action refused as a bad
+    signature. Resolving the path the same way the relay does is the whole
+    point of this being a command rather than a paragraph in the README.
+    """
+    path = config_dir() / SECRET_FILENAME
+    created = not path.exists()
+    flag = build_flag(load_or_create_secret(path))
+    print(f"# {'generated' if created else 'existing'}: {path}", file=sys.stderr)
+    print("# paste into firmware/secret.ini under [env:cardputer-adv]",
+          file=sys.stderr)
+    print(flag)
     return 0
 
 
@@ -137,11 +165,16 @@ def main() -> int:
                     help="dump the injected environment and exit")
     ap.add_argument("--once", action="store_true",
                     help="send a single frame and exit")
+    ap.add_argument("--secret-flag", action="store_true",
+                    help="print the PlatformIO flag for firmware/secret.ini, "
+                         "generating the secret on first run")
     args = ap.parse_args()
 
     setup_logging()
     if args.probe_env:
         return probe_env()
+    if args.secret_flag:
+        return secret_flag()
     if args.once:
         return asyncio.run(once())
     return asyncio.run(serve())

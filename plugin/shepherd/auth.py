@@ -125,5 +125,12 @@ def verify(secret: bytes, presented: object, ts: str, pane_id: str,
 
 
 def build_flag(secret: bytes) -> str:
-    """The PlatformIO flag that bakes this secret into the firmware."""
-    return f"-DSHEPHERD_SECRET='\"{secret.hex()}\"'"
+    r"""The PlatformIO flag that bakes this secret into the firmware.
+
+    The backslash escaping is not decoration and not a shell quoting habit:
+    PlatformIO consumes plain quotes out of an ini `build_flags`, and the
+    define then reaches the compiler as a bare numeric token rather than a
+    string. `\"..\"` is the form verified to build and to produce signatures
+    the relay accepts.
+    """
+    return f'-DSHEPHERD_SECRET=\\"{secret.hex()}\\"'

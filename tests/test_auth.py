@@ -85,9 +85,14 @@ def test_secret_is_stored_as_hex_for_pasting_into_a_build_flag(tmp_path):
     text = p.read_text(encoding="utf-8").strip()
     assert bytes.fromhex(text) == raw
     assert text == text.lower()
-    flag = build_flag(raw)
-    assert flag.startswith("-DSHEPHERD_SECRET=")
-    assert raw.hex() in flag
+    # Pinned exactly, not by prefix. The loose assertion here let a flag of
+    # the form -DSHEPHERD_SECRET='"..."' pass for weeks: correct on a shell
+    # command line, wrong in a PlatformIO ini, where plain quotes are eaten
+    # and the define reaches the compiler as a bare numeric token. This is
+    # the form verified byte-for-byte against a secret.ini that builds and
+    # produces signatures the relay accepts.
+    assert build_flag(raw) == '-DSHEPHERD_SECRET=\\"' + raw.hex() + '\\"'
+    assert build_flag(raw).count("\\") == 2
 
 
 def test_a_corrupt_secret_file_fails_loudly(tmp_path):
