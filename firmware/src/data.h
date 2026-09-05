@@ -153,7 +153,14 @@ struct _LineBuf {
   }
 };
 
-static _LineBuf<1024> _usbLine, _btLine;
+// 1024 was upstream's size for its own small status frames. Shepherd's
+// snapshot is much larger - twelve agents, each with a status, a timestamp,
+// a recap and possibly a prompt - and a line that does not fit is not
+// reported anywhere: the overflow branch below silently drops the excess
+// bytes, then the newline flushes a truncated JSON that fails to parse and
+// is treated as somebody else's frame. The screen just goes stale.
+static _LineBuf<1024> _usbLine;
+static _LineBuf<4096> _btLine;
 
 inline void dataPoll(TamaState* out) {
   uint32_t now = millis();

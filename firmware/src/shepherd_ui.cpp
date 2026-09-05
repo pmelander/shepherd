@@ -83,6 +83,33 @@ static int g_cursor = 0;          // which agent the queue is showing
 static char g_note[40] = {0};     // transient feedback line
 static uint32_t g_noteUntil = 0;
 
+// Which screen is up.
+//
+// Auto follows the herd: the queue when something is blocked, the list when
+// nothing is. List and Detail are places you went deliberately, and they
+// stick — a keepalive arriving every ten seconds must not yank the screen
+// out from under someone reading it. Only a genuinely NEW prompt does that.
+enum class ShepherdView : uint8_t { Auto, List, Detail };
+static ShepherdView g_view = ShepherdView::Auto;
+
+static int g_listSel = 0;         // highlighted row in the herd list
+static int g_listTop = 0;         // first visible row, for scrolling
+static uint32_t g_detailMs = 0;   // when the recap started spelling itself out
+
+// The pane the queue was showing last frame. Used to tell "the same prompt is
+// still there" from "a new one arrived", which is the only thing allowed to
+// pull the screen back from wherever the reader navigated to.
+static char g_lastShowable[SHEPHERD_PANE_LEN] = {0};
+
+// Rows the list can show at once: from y=18 down to the footer rule, at 11px
+// a row. Fewer than MAX_AGENTS, so the window has to scroll.
+#define SH_LIST_ROWS 9
+
+// Milliseconds per character of the recap. ~25 c/s reads as deliberate
+// rather than slow; a full 64-character recap lands in about two and a half
+// seconds, which is roughly how long it takes to focus on the screen anyway.
+#define SH_TYPE_MS 40
+
 // Colours chosen for a 240x135 IPS at arm's length: high contrast, few hues,
 // and status carried by colour AND text so it survives being glanced at.
 static const uint16_t C_BG      = 0x0000;
@@ -129,20 +156,38 @@ bool shepherdUiApply(const char* line) {
   if (r != SHEPHERD_OK) return true;
 
   g_badVersion = false;
-  // Keep the cursor on the same agent across frames where possible, so a
-  // refresh arriving as you reach for a key does not move the answer out
-  // from under your thumb.
+  // Keep both cursors on the same agent across frames where possible, so a
+  // refresh arriving as you reach for a key does not move the answer — or
+  // the row you were reading — out from under your thumb. The frame is
+  // re-sorted by the host on every build, so index alone is not stable.
   char keep[SHEPHERD_PANE_LEN] = {0};
   if (g_cursor >= 0 && g_cursor < g_frame.count)
     strncpy(keep, g_frame.agents[g_cursor].pane, sizeof(keep) - 1);
+  char keepSel[SHEPHERD_PANE_LEN] = {0};
+  if (g_listSel >= 0 && g_listSel < g_frame.count)
+    strncpy(keepSel, g_frame.agents[g_listSel].pane, sizeof(keepSel) - 1);
 
   g_frame = parsed;
   g_cursor = 0;
-  if (keep[0]) {
-    for (int i = 0; i < g_frame.count; i++) {
-      if (strcmp(g_frame.agents[i].pane, keep) == 0) { g_cursor = i; break; }
-    }
+  g_listSel = 0;
+  for (int i = 0; i < g_frame.count; i++) {
+    if (keep[0] && strcmp(g_frame.agents[i].pane, keep) == 0) g_cursor = i;
+    if (keepSel[0] && strcmp(g_frame.agents[i].pane, keepSel) == 0) g_listSel = i;
   }
+
+  // A new prompt beats whatever the reader was doing. The same prompt still
+  // sitting there does not — otherwise every keepalive would bounce them out
+  // of a recap they were halfway through.
+  int showable = g_frame.firstShowable();
+  char nowShowable[SHEPHERD_PANE_LEN] = {0};
+  if (showable >= 0)
+    strncpy(nowShowable, g_frame.agents[showable].pane, sizeof(nowShowable) - 1);
+  if (nowShowable[0] && strcmp(nowShowable, g_lastShowable) != 0) {
+    g_view = ShepherdView::Auto;
+    g_cursor = showable;
+  }
+  strncpy(g_lastShowable, nowShowable, sizeof(g_lastShowable) - 1);
+  g_lastShowable[sizeof(g_lastShowable) - 1] = 0;
   return true;
 }
 
@@ -252,33 +297,140 @@ static void drawBadVersion(M5Canvas& spr, int W, int H) {
   spr.drawString("reflash the device", W / 2, H / 2 + 20);
 }
 
-// Nothing needs answering: a compact list of the herd.
+// Draw `text` wrapped, but only its first `reveal` characters.
+//
+// The wrap is computed over the WHOLE string and the reveal happens inside
+// that fixed layout. Wrapping the revealed prefix instead would be simpler
+// and much worse: words would jump between lines as the typewriter caught up
+// with them, and the reader would be chasing the text.
+static void drawTyped(M5Canvas& spr, const char* text, int x, int y,
+                      int cols, int maxLines, int lineH, int reveal) {
+  int len = (int)strlen(text);
+  int pos = 0, line = 0, drawn = 0;
+  char buf[96];
+  while (pos < len && line < maxLines) {
+    int take = len - pos;
+    if (take > cols) {
+      take = cols;
+      int sp = -1;
+      for (int i = take; i > cols / 2; i--) {
+        if (text[pos + i] == ' ') { sp = i; break; }
+      }
+      if (sp > 0) take = sp;
+    }
+    if (take >= (int)sizeof(buf)) take = (int)sizeof(buf) - 1;
+
+    int show = reveal - drawn;
+    if (show <= 0) break;
+    if (show > take) show = take;
+    memcpy(buf, text + pos, show);
+    buf[show] = 0;
+    spr.drawString(buf, x, y + line * lineH);
+
+    // A caret at the write head, while there is still text to come. It is
+    // what makes the reveal read as typing rather than as a slow redraw.
+    if (drawn + show < len)
+      spr.drawString("_", x + show * 6, y + line * lineH);
+
+    drawn += take;                 // advance by the whole line, not the part
+    pos += take;                   // shown, so the layout stays put
+    while (pos < len && text[pos] == ' ') { pos++; drawn++; }
+    line++;
+  }
+}
+
+// Nothing needs answering: a scrollable list of the herd, with a cursor.
 static void drawHerd(M5Canvas& spr, int W, int H) {
   spr.setTextSize(1);
   spr.setTextDatum(TL_DATUM);
-  int y = 18;
   const int lineH = 11;
-  int shown = 0;
-  for (int i = 0; i < g_frame.count && y < H - 12; i++) {
-    const ShepherdAgent& a = g_frame.agents[i];
-    spr.setTextColor(statusColour(a), C_BG);
-    spr.drawString(a.alias, 6, y);
-    spr.setTextDatum(TR_DATUM);
-    spr.drawString(a.status, W - 6, y);
-    spr.setTextDatum(TL_DATUM);
-    y += lineH;
-    shown++;
-  }
-  if (shown == 0) {
+
+  if (g_frame.count == 0) {
     spr.setTextDatum(MC_DATUM);
     spr.setTextColor(C_DIM, C_BG);
     spr.drawString("no agents", W / 2, H / 2);
     spr.setTextDatum(TL_DATUM);
+    return;
   }
+
+  // Keep the selection inside the window, scrolling by the minimum needed so
+  // the list does not jump a page when you step off the edge of it.
+  if (g_listSel < g_listTop) g_listTop = g_listSel;
+  if (g_listSel >= g_listTop + SH_LIST_ROWS) g_listTop = g_listSel - SH_LIST_ROWS + 1;
+  if (g_listTop > g_frame.count - SH_LIST_ROWS) g_listTop = g_frame.count - SH_LIST_ROWS;
+  if (g_listTop < 0) g_listTop = 0;
+
+  int y = 18;
+  for (int i = g_listTop; i < g_frame.count && i < g_listTop + SH_LIST_ROWS; i++) {
+    const ShepherdAgent& a = g_frame.agents[i];
+    if (i == g_listSel) {
+      spr.fillRect(0, y - 1, W, lineH, 0x2104);   // a band, not an inversion:
+      spr.drawString(">", 1, y);                  // status colour must survive
+    }
+    spr.setTextColor(statusColour(a), C_BG);
+    spr.drawString(a.alias, 8, y);
+    spr.setTextDatum(TR_DATUM);
+    spr.drawString(a.status, W - 6, y);
+    spr.setTextDatum(TL_DATUM);
+    y += lineH;
+  }
+
+  // Only claim there is more when there is; a permanent "..." teaches people
+  // to ignore it.
+  if (g_frame.count > SH_LIST_ROWS) {
+    char pos[16];
+    snprintf(pos, sizeof(pos), "%d/%d", g_listSel + 1, g_frame.count);
+    spr.setTextDatum(TR_DATUM);
+    spr.setTextColor(C_DIM, C_BG);
+    spr.drawString(pos, W - 6, H - 11);
+    spr.setTextDatum(TL_DATUM);
+  }
+
+  spr.drawFastHLine(0, H - 14, W, C_DIM);
+  spr.setTextColor(C_DIM, C_BG);
   if (g_frame.degraded) {
     spr.setTextColor(C_STALE, C_BG);
-    spr.drawString(g_frame.why, 6, H - 10);
+    spr.drawString(g_frame.why, 6, H - 11);
+  } else {
+    spr.drawString("[;/.] move  [enter] recap", 6, H - 11);
   }
+}
+
+// One agent, at length: what it says it is doing, and for how long.
+static void drawDetail(M5Canvas& spr, int W, int H, int idx) {
+  const ShepherdAgent& a = g_frame.agents[idx];
+
+  spr.setTextSize(1);
+  spr.setTextDatum(TL_DATUM);
+  spr.setTextColor(statusColour(a), C_BG);
+  spr.drawString(a.alias, 6, 18);
+
+  // Status and how long it has been that way, on one line. The duration is
+  // computed from two absolute timestamps in the frame, so it is the host's
+  // clock talking, not this board's.
+  char right[32];
+  char ago[12];
+  shepherdFormatElapsed(ago, sizeof(ago), shepherdElapsed(g_frame, a));
+  if (ago[0]) snprintf(right, sizeof(right), "%s  %s", a.status, ago);
+  else        snprintf(right, sizeof(right), "%s", a.status);
+  spr.setTextDatum(TR_DATUM);
+  spr.drawString(right, W - 6, 18);
+  spr.setTextDatum(TL_DATUM);
+  spr.drawFastHLine(0, 30, W, 0x2104);
+
+  if (a.recap[0]) {
+    int reveal = (int)((millis() - g_detailMs) / SH_TYPE_MS);
+    spr.setTextColor(C_TEXT, C_BG);
+    drawTyped(spr, a.recap, 6, 36, 38, 6, 11, reveal);
+  } else {
+    spr.setTextColor(C_DIM, C_BG);
+    spr.drawString("no recap - this agent has", 6, 36);
+    spr.drawString("not said what it is doing", 6, 47);
+  }
+
+  spr.drawFastHLine(0, H - 14, W, C_DIM);
+  spr.setTextColor(C_DIM, C_BG);
+  spr.drawString("[del] back   [;/.] next agent", 6, H - 11);
 }
 
 // Something needs answering: the queue screen.
@@ -315,9 +467,12 @@ static void drawQueue(M5Canvas& spr, int W, int H, int idx) {
     spr.setTextColor(C_LOCK, C_BG);
     spr.drawString("locked - Fn+Enter to unlock", 6, H - 11);
   } else if (!canApprove) {
-    spr.drawString("[n] deny   [>] next", 6, H - 11);
+    spr.drawString("[n] deny  [>] next  [del] list", 6, H - 11);
   } else {
-    spr.drawString("[y] approve  [n] deny  [>] next", 6, H - 11);
+    // 40 columns at 6px, so this is the whole budget. "del" earns its place:
+    // without it the herd list is unreachable exactly when the device is
+    // most worth looking at.
+    spr.drawString("[y]ok [n]no [>]next [del]list", 6, H - 11);
   }
 }
 
@@ -329,6 +484,10 @@ void shepherdUiDraw(M5Canvas& spr, int W, int H) {
     drawBadVersion(spr, W, H);
   } else if (stale()) {
     drawStale(spr, W, H);
+  } else if (g_view == ShepherdView::Detail && g_listSel < g_frame.count) {
+    drawDetail(spr, W, H, g_listSel);
+  } else if (g_view == ShepherdView::List) {
+    drawHerd(spr, W, H);
   } else {
     // Showable, not answerable. Driving the screen off answerability sent a
     // blocked-but-truncated agent to the herd list, where it read as one more
@@ -377,30 +536,89 @@ static void sendAct(const ShepherdAgent& a, const char* action) {
   }
 }
 
+// The list and the detail screen share a selection. Moving it wraps, because
+// on a nine-row window with twelve agents the alternative is a dead key at
+// each end.
+static void moveSelection(int delta) {
+  if (g_frame.count <= 0) return;
+  g_listSel = (g_listSel + delta + g_frame.count) % g_frame.count;
+}
+
+// Whether the herd list is what is currently on screen.
+static bool showingList() {
+  if (g_view == ShepherdView::List) return true;
+  return g_view == ShepherdView::Auto && g_frame.firstShowable() < 0;
+}
+
 bool shepherdUiKey(HalKey k) {
   if (!shepherdUiActive()) return false;
 
   const uint32_t now = millis();
 
-  // The lock is checked before the version and staleness gates, so the chord
-  // still works on a screen that is refusing to render anything else. Being
-  // unable to unlock a NO SIGNAL device would mean waiting out a reconnect
-  // with a dead keyboard.
+  // The chord is handled before the version and staleness gates, so it still
+  // works on a screen that is refusing to render anything else. Being unable
+  // to unlock a NO SIGNAL device would mean waiting out a reconnect with a
+  // dead keyboard.
   if (k == HalKey::Unlock) {
     note(g_lock.toggle(now) ? "locked" : "unlocked");
     return true;
   }
-  // accept() both tests the lock and, when it passes, resets the idle timer:
-  // using the device is what keeps it awake.
-  if (!g_lock.accept(now)) {
-    // Consumed, not passed on. While Shepherd owns the screen a locked key
-    // must not reach the buddy's own approve path either. And it says so,
-    // because a silent no-op is how the last bug presented.
-    note("locked - Fn+Enter");
-    return true;
-  }
   if (g_badVersion || stale()) return false;
 
+  // Every key you press keeps an unlocked device awake. The lock itself is
+  // enforced at the two places that actually send something, not here -
+  // reading the herd in a pocket harms nothing, and a device you must unlock
+  // before you may even look at it is a worse glance device for no gain.
+  g_lock.touch(now);
+
+  // ---- the detail screen -------------------------------------------------
+  if (g_view == ShepherdView::Detail) {
+    switch (k) {
+      case HalKey::Back:
+        g_view = ShepherdView::List;
+        return true;
+      case HalKey::Up:
+      case HalKey::Left:
+      case HalKey::Down:
+      case HalKey::Right:
+        // Walk the herd without surfacing to the list between agents.
+        moveSelection((k == HalKey::Down || k == HalKey::Right) ? 1 : -1);
+        g_detailMs = now;   // each agent spells itself out afresh
+        return true;
+      default:
+        // Nothing on this screen sends anything, so swallow the rest rather
+        // than letting y/n fall through to a queue the reader cannot see.
+        return true;
+    }
+  }
+
+  // ---- the herd list -----------------------------------------------------
+  if (showingList()) {
+    switch (k) {
+      case HalKey::Up:
+      case HalKey::Left:
+        moveSelection(-1);
+        return true;
+      case HalKey::Down:
+      case HalKey::Right:
+        moveSelection(1);
+        return true;
+      case HalKey::Approve:
+        if (g_frame.count == 0) return true;
+        g_view = ShepherdView::Detail;
+        g_detailMs = now;
+        return true;
+      case HalKey::Back:
+        // Back out of a list you navigated to deliberately; on the automatic
+        // list there is nowhere further out to go.
+        if (g_view == ShepherdView::List) g_view = ShepherdView::Auto;
+        return true;
+      default:
+        return false;   // m for the buddy menu, etc.
+    }
+  }
+
+  // ---- the queue ---------------------------------------------------------
   // Keys follow the screen: whatever drawQueue is showing is what y/n act on.
   int idx = g_frame.firstShowable(g_cursor);
   if (idx < 0) idx = g_frame.firstShowable();
@@ -414,6 +632,7 @@ bool shepherdUiKey(HalKey k) {
         note("cannot approve - laptop");
         return true;
       }
+      if (!g_lock.accept(now)) { note("locked - Fn+Enter"); return true; }
       sendAct(g_frame.agents[idx], "approve");
       note("approved");
       g_cursor = idx + 1;
@@ -422,8 +641,10 @@ bool shepherdUiKey(HalKey k) {
     case HalKey::Deny:
       // Deny stays available even when approve is not: escaping a prompt you
       // cannot fully read is always safe, and it is the whole point of being
-      // able to answer from the sofa.
+      // able to answer from the sofa. It is still an action, so it is still
+      // behind the lock.
       if (idx < 0) return false;
+      if (!g_lock.accept(now)) { note("locked - Fn+Enter"); return true; }
       sendAct(g_frame.agents[idx], "deny");
       note("denied");
       g_cursor = idx + 1;
@@ -435,6 +656,13 @@ bool shepherdUiKey(HalKey k) {
       g_cursor = (next >= 0) ? next : 0;
       return true;
     }
+
+    case HalKey::Back:
+      // The way to the herd list while something is queued. Without it the
+      // list is unreachable exactly when the device is most interesting.
+      g_view = ShepherdView::List;
+      if (idx >= 0) g_listSel = idx;
+      return true;
 
     default:
       return false;

@@ -250,9 +250,21 @@ struct KeyBtn : HalBtn {
 };
 
 struct EnterBtn : KeyBtn {
+  // Fn+Enter belongs to Shepherd's key lock and must be invisible here.
+  // Without this the chord presses BtnA in parallel with emitting
+  // HalKey::Unlock, so unlocking also cycles the buddy's displayMode - and
+  // holding it the extra 600ms opens the buddy menu, which draws over
+  // Shepherd's queue.
+  //
+  // Latched for the whole hold rather than tested per poll: releasing Fn
+  // while Enter is still down would otherwise look like a fresh rise and
+  // fire the buddy anyway. Cleared when Enter itself comes up.
+  bool _chord = false;
   bool isDown() override {
     auto st = M5Cardputer.Keyboard.keysState();
-    return st.enter;
+    if (!st.enter) { _chord = false; return false; }
+    if (st.fn) _chord = true;
+    return !_chord;
   }
 };
 struct EscBtn : KeyBtn {

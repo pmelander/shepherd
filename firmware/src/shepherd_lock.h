@@ -63,12 +63,23 @@ struct ShepherdLock {
     return _locked;
   }
 
-  // An ordinary key arrived. True when it may act; false means the caller
-  // must swallow it AND say so on screen — a key that does nothing silently
-  // is indistinguishable from a broken device.
+  // An action is about to be sent. True when it may go; false means the
+  // caller must swallow it AND say so on screen — a key that does nothing
+  // silently is indistinguishable from a broken device.
+  //
+  // Gating the send rather than the keystroke is deliberate. Reading the
+  // herd, moving down the list and opening a recap are all harmless in a
+  // pocket, and a device you must unlock before you can even look at it
+  // would be a worse glance device for no safety gained.
   bool accept(uint32_t now) {
     if (locked(now)) return false;
     _lastKeyMs = now;   // using it keeps it awake
     return true;
+  }
+
+  // Any key at all arrived. Keeps an unlocked device awake while it is being
+  // read, without ever unlocking one.
+  void touch(uint32_t now) {
+    if (!locked(now)) _lastKeyMs = now;
   }
 };

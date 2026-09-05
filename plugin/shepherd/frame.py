@@ -5,8 +5,8 @@ the most testable layer in the project and it carries most of the decisions
 the review argued about, so the tests here are the record of those decisions.
 
 The frame is newline-delimited UTF-8 JSON over Nordic UART. Field names are
-one or two characters because the device has no PSRAM, a 2048-byte receive
-ring, and an ATT MTU that Windows may negotiate down to 23 — every byte is
+one or two characters because the device has no PSRAM, a bounded receive
+path, and an ATT MTU that Windows may negotiate down to 23 — every byte is
 another notify round trip.
 """
 
@@ -27,7 +27,9 @@ from .models import Agent, AgentStatus, HerdSnapshot
 # resync and gap detection: those guard against reordering that an ACKed link
 # cannot produce, whereas flashing firmware and forgetting which relay it
 # matches is a thing that genuinely happens.
-PROTOCOL_VERSION = 1
+#
+# v2 added `d`, the per-agent recap.
+PROTOCOL_VERSION = 2
 
 # Display alias width. Long enough to tell Yield_PriceManager_API from
 # Yield_InitialPricing_Service, short enough for a 40-column grid.
@@ -40,10 +42,24 @@ ALIAS_LEN = 8
 PROMPT_MAX = 100
 
 # Upper bound on agents in one frame. Not a product limit — a buffer limit.
-# The device's RX ring is 2048 bytes; a frame is roughly 65 bytes per idle
-# agent and ~185 for a blocked one, so twelve leaves comfortable headroom
+#
+# The binding constraint is the device's line-reassembly buffer, not its BLE
+# ring: data.h holds one JSON line at a time and drops the overflow silently,
+# which presents as a stale screen rather than an error. That buffer was 1024
+# bytes and is now 4096. A frame is roughly 65 bytes per idle agent, ~130
+# with a recap, and ~250 for a blocked one, so twelve fits several times over
 # even with two prompts in flight.
 MAX_AGENTS = 12
+
+# Per-agent recap, shown on the device's detail screen. This is Claude Code's
+# own summary of what it is doing, which Herdr surfaces as
+# `terminal_title_stripped` - so it is the agent describing itself rather
+# than Shepherd guessing from a cwd.
+#
+# 64 characters is what the 240px screen can spell out in a couple of seconds
+# without the reader losing patience, and it keeps a full twelve-agent frame
+# inside the device's line buffer.
+RECAP_MAX = 64
 
 _ALIAS_STRIP = re.compile(r"[^A-Za-z0-9]+")
 
@@ -117,6 +133,22 @@ def truncate_prompt(text: str) -> tuple[str, bool]:
     if len(collapsed) <= PROMPT_MAX:
         return collapsed, False
     return collapsed[: PROMPT_MAX - 1] + "…", True
+
+
+def truncate_recap(text: str) -> str:
+    """One line of self-description, or empty.
+
+    Unlike a prompt, a cut recap carries no safety consequence - nothing is
+    approved against it - so it is truncated silently and carries no flag.
+
+    The marker is ASCII "..." rather than an ellipsis character. The device's
+    default M5GFX font has no glyph for U+2026, and a recap is the one field
+    written to be read at length rather than glanced at.
+    """
+    collapsed = " ".join((text or "").split())
+    if len(collapsed) <= RECAP_MAX:
+        return collapsed
+    return collapsed[: RECAP_MAX - 3] + "..."
 
 
 def decision_id(pane_id: str, state_change_seq: int, prompt: str) -> str:
@@ -270,6 +302,9 @@ class FrameBuilder:
             # Omitted when we cannot honestly claim to know it — see _Seen.
             if seen[a.pane_id].observed:
                 row["e"] = iso(seen[a.pane_id].since)
+            recap = truncate_recap(a.terminal_title)
+            if recap:
+                row["d"] = recap
             if a.status is AgentStatus.BLOCKED:
                 text = prompts.get(a.pane_id)
                 if text:

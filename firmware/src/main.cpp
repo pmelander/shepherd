@@ -1563,7 +1563,17 @@ void loop() {
     // y/n answer the queued prompt rather than upstream's aggregate one.
     // It returns false for keys it does not use, which fall through to the
     // buddy's own handling below.
-    if (shepherdUiKey(k)) continue;
+    if (shepherdUiKey(k)) {
+      // Enter and Del/` drive HalBtn A/B *in parallel* with the HalKey
+      // event, so a key Shepherd consumed must suppress the matching
+      // release exactly as the modals below do. Without it, approving with
+      // Enter also cycles the buddy's displayMode underneath the queue.
+      // suppressPending() no-ops unless that button is genuinely held, so
+      // calling it for a 'y' press is harmless.
+      if (k == HalKey::Approve || k == HalKey::Unlock) halBtnA().suppressPending();
+      if (k == HalKey::Back) halBtnB().suppressPending();
+      continue;
+    }
 
     // Pending approval overrides everything else — Y/N answer directly.
     if (promptLive) {

@@ -28,7 +28,8 @@
 // Must match PROTOCOL_VERSION in plugin/shepherd/frame.py. A mismatch is
 // reported on screen rather than rendered, because drawing fields you do not
 // understand is how a glance device lies.
-#define SHEPHERD_PROTOCOL_VERSION 1
+// v2 added `d`, the per-agent recap shown on the detail screen.
+#define SHEPHERD_PROTOCOL_VERSION 2
 
 // The host caps a frame at 12 agents (its MAX_AGENTS) for the sake of this
 // device's 2048-byte receive ring. Matching it here means an over-long frame
@@ -43,6 +44,9 @@
 #define SHEPHERD_WHY_LEN 84
 #define SHEPHERD_TS_LEN 24
 #define SHEPHERD_MAC_LEN 17   // 16 hex chars + NUL
+// RECAP_MAX in frame.py is 64 characters; the host cuts with ASCII "..." so
+// this is 64 bytes, not 64 codepoints. Rounded up for headroom.
+#define SHEPHERD_RECAP_LEN 72
 
 struct ShepherdAgent {
   char pane[SHEPHERD_PANE_LEN];
@@ -50,6 +54,13 @@ struct ShepherdAgent {
   char status[SHEPHERD_STATUS_LEN];
   char question[SHEPHERD_QUESTION_LEN];
   char decision[SHEPHERD_DECISION_LEN];
+  // The agent's own one-line summary of what it is doing, from Claude Code's
+  // terminal title by way of Herdr. Empty when it has not said anything.
+  char recap[SHEPHERD_RECAP_LEN];
+  // When it entered this state, absolute and UTC. Empty when the host cannot
+  // honestly claim to know - see _Seen in frame.py. Absolute rather than a
+  // count so the device never ticks its own clock.
+  char since[SHEPHERD_TS_LEN];
   bool truncated;
   bool hasQuestion;
 
@@ -168,6 +179,8 @@ inline ShepherdParse shepherdParse(const char* line, ShepherdFrame* out) {
       a.hasQuestion = true;
     }
     _shCopy(a.decision, sizeof(a.decision), row["r"] | (const char*)nullptr);
+    _shCopy(a.recap, sizeof(a.recap), row["d"] | (const char*)nullptr);
+    _shCopy(a.since, sizeof(a.since), row["e"] | (const char*)nullptr);
     a.truncated = row["x"] | false;
     out->count++;
   }
@@ -179,6 +192,66 @@ inline ShepherdParse shepherdParse(const char* line, ShepherdFrame* out) {
     out->degraded = true;
   }
   return SHEPHERD_OK;
+}
+
+// ------------------------------------------------------------- elapsed
+//
+// The frame carries two absolute UTC timestamps — its own `ts` and each
+// agent's `e` — and the device subtracts them. That is the whole reason the
+// host sends absolutes: this board has no battery-backed RTC, its system
+// clock is whatever the last time-sync said, and a device ticking its own
+// "waiting 4m" counter would drift away from the truth between frames.
+//
+// Both strings are "YYYY-MM-DDTHH:MM:SSZ", written by strftime on the host,
+// so this parses that exact shape and refuses anything else rather than
+// guessing.
+
+// Days since 1970-01-01 for a civil date. Howard Hinnant's algorithm, valid
+// for any proleptic Gregorian date; used here so the calculation needs no
+// libc time support and runs identically in the native tests.
+inline long _shDaysFromCivil(int y, unsigned m, unsigned d) {
+  y -= m <= 2;
+  const int era = (y >= 0 ? y : y - 399) / 400;
+  const unsigned yoe = (unsigned)(y - era * 400);
+  const unsigned doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+  const unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+  return (long)era * 146097 + (long)doe - 719468;
+}
+
+// Seconds since the epoch, or -1 when the string is not the expected shape.
+inline long shepherdIsoSeconds(const char* iso) {
+  if (!iso || !*iso) return -1;
+  int y = 0, mo = 0, d = 0, h = 0, mi = 0, s = 0;
+  if (sscanf(iso, "%4d-%2d-%2dT%2d:%2d:%2dZ", &y, &mo, &d, &h, &mi, &s) != 6)
+    return -1;
+  if (mo < 1 || mo > 12 || d < 1 || d > 31) return -1;
+  if (h > 23 || mi > 59 || s > 60) return -1;
+  return _shDaysFromCivil(y, (unsigned)mo, (unsigned)d) * 86400L
+         + h * 3600L + mi * 60L + s;
+}
+
+// How long the agent has been in this state, in seconds, or -1 when unknown.
+//
+// Negative differences clamp to 0 rather than being reported: a frame whose
+// `e` is a second ahead of its `ts` is a rounding artefact, and "-1s ago" on
+// a glance screen reads as a bug in a way that "0s" does not.
+inline long shepherdElapsed(const ShepherdFrame& f, const ShepherdAgent& a) {
+  long now = shepherdIsoSeconds(f.ts);
+  long then = shepherdIsoSeconds(a.since);
+  if (now < 0 || then < 0) return -1;
+  return now > then ? now - then : 0;
+}
+
+// "4m", "2h10m", "3d" — the coarsest unit that still says something. Always
+// NUL-terminates; writes "" when the duration is unknown.
+inline void shepherdFormatElapsed(char* buf, size_t cap, long secs) {
+  if (!buf || cap == 0) return;
+  if (secs < 0) { buf[0] = 0; return; }
+  if (secs < 60)          snprintf(buf, cap, "%lds", secs);
+  else if (secs < 3600)   snprintf(buf, cap, "%ldm", secs / 60);
+  else if (secs < 86400)  snprintf(buf, cap, "%ldh%ldm", secs / 3600,
+                                   (secs % 3600) / 60);
+  else                    snprintf(buf, cap, "%ldd", secs / 86400);
 }
 
 // The exact bytes both sides sign. Mirrors canonical_message() in

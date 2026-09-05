@@ -17,7 +17,13 @@
 // Incoming bytes are buffered in a simple ring for bleRead()/bleAvailable().
 // Sized to hold a transcript snapshot JSON plus headroom; the GATT layer
 // will flow-control if we fall behind.
-static const size_t RX_CAP = 2048;
+//
+// Must stay comfortably larger than the largest single frame, because a full
+// ring is dropped on the floor (see rxPush) and a frame missing bytes from
+// its middle is not detectably different from one somebody else sent. At a
+// 517-byte MTU a whole Shepherd snapshot can land in three notifies, faster
+// than the main loop's drain.
+static const size_t RX_CAP = 4096;
 static uint8_t  rxBuf[RX_CAP];
 static volatile size_t rxHead = 0;
 static volatile size_t rxTail = 0;

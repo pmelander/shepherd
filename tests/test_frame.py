@@ -24,7 +24,9 @@ from shepherd.frame import (  # noqa: E402
     decision_id,
     derive_alias,
     disambiguate,
+    RECAP_MAX,
     truncate_prompt,
+    truncate_recap,
 )
 from shepherd.models import Agent, AgentStatus, HerdSnapshot  # noqa: E402
 
@@ -319,3 +321,52 @@ def test_encoding_is_valid_json_and_keeps_unicode_readable():
     )
     decoded = json.loads(b.encode(f).decode("utf-8"))
     assert decoded["a"][0]["q"].endswith("…")  # not \u2026 double-escaped
+
+
+# ------------------------------------------------------------- the recap
+
+
+def test_the_recap_is_the_agents_own_summary_not_ours():
+    # terminal_title_stripped is what Claude Code writes about itself, so the
+    # detail screen quotes the agent rather than guessing from a cwd.
+    b = FrameBuilder(now=Clock())
+    frame = b.build(HerdSnapshot(agents=(
+        agent("w2:p1", title="PriceComponentManager_Client migration to React"),
+    )))
+    assert frame["a"][0]["d"] == "PriceComponentManager_Client migration to React"
+
+
+def test_an_agent_with_nothing_to_say_carries_no_recap_field():
+    # Absent beats empty: the device tests for the field, and an empty string
+    # would make it draw a heading over nothing.
+    b = FrameBuilder(now=Clock())
+    frame = b.build(HerdSnapshot(agents=(agent("w2:p1", title=""),)))
+    assert "d" not in frame["a"][0]
+
+
+def test_a_long_recap_is_cut_silently():
+    # Unlike a prompt, nothing is approved against a recap, so a cut one
+    # needs no flag and must not make the agent unanswerable.
+    long = " ".join(["migration"] * 40)
+    assert len(truncate_recap(long)) == RECAP_MAX
+    # ASCII, not U+2026: the device font has no glyph for the ellipsis.
+    assert truncate_recap(long).endswith("...")
+    assert truncate_recap("  spaced   out  ") == "spaced out"
+    assert truncate_recap(None) == ""
+
+
+def test_a_full_herd_with_recaps_still_fits_the_device_line_buffer():
+    # The device reassembles one JSON line at a time and drops the overflow
+    # silently - a stale screen, not an error - so this bound is the one that
+    # actually matters. 4096 is the buffer; the margin is deliberate.
+    b = FrameBuilder(now=Clock())
+    agents = tuple(
+        agent(f"w{i}:p1", status=AgentStatus.BLOCKED, seq=i,
+              cwd=rf"C:\.workspaces\some-fairly-long-workspace-name-{i}",
+              title="x" * 80)
+        for i in range(MAX_AGENTS)
+    )
+    prompts = {a.pane_id: "y" * 400 for a in agents}
+    b.build(HerdSnapshot(agents=agents), prompts)   # seed _seen so `e` appears
+    payload = b.encode(b.build(HerdSnapshot(agents=agents), prompts))
+    assert len(payload) < 4096, len(payload)
