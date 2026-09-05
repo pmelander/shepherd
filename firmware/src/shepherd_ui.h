@@ -37,5 +37,19 @@ void shepherdUiDraw(M5Canvas& spr, int W, int H);
 bool shepherdUiKey(HalKey k);
 
 // True while the device is showing a question the host will accept an answer
-// for — used to decide whether to chirp.
+// for.
 bool shepherdUiNeedsAttention();
+
+// True exactly once when a blocked agent needs a human, and again every
+// SHEPHERD_NAG_MS for as long as `unseen` stays true.
+//
+// Edge-triggered rather than level, because the caller wakes the screen and
+// makes a noise with it, and "an agent is still blocked" is true for minutes.
+// Pass screenOff as `unseen`: once the display is up, the reader has been
+// told, and a device that keeps chirping at someone already looking at it is
+// a device they will turn off.
+bool shepherdUiTakeAlarm(bool unseen);
+
+// Lock the keys immediately, without waiting out the idle window. Called
+// when the screen goes dark.
+void shepherdUiLock();

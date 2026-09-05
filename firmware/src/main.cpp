@@ -131,6 +131,13 @@ static void prevPet() {
 }
 uint32_t wakeTransitionUntil = 0;
 const uint32_t SCREEN_OFF_MS = 120000;
+// Shepherd's own, much shorter. This is a pocket device that wakes itself for
+// anything worth knowing, so there is no reason to burn a backlight on a herd
+// nobody is looking at - and unlike upstream's timer it applies on USB too.
+// Upstream exempts USB because it wants its clock face visible while
+// charging; a Shepherd screen lit at a desk is showing you what the laptop
+// two feet away already is.
+const uint32_t SHEPHERD_SCREEN_OFF_MS = 15000;
 
 bool     napping = false;
 uint32_t napStartMs = 0;
@@ -1394,9 +1401,24 @@ void loop() {
 
   if ((int32_t)(now - oneShotUntil) >= 0) activeState = baseState;
 
+  // Shepherd's alarm. This is the half of the product that is not the
+  // screen: a device you have to look at to discover something is waiting is
+  // not much better than the laptop you were already not looking at.
+  //
+  // Edge-triggered inside shepherdUiTakeAlarm, and told whether the screen is
+  // off so it knows whether anyone has been shown the news yet.
+  const bool shepAttention = shepherdUiActive() && shepherdUiNeedsAttention();
+  if (shepherdUiTakeAlarm(screenOff)) {
+    wake();
+    if (settings().sound) sfxAlert();
+  }
+
   // LED: pulse on attention, otherwise off. halLedSet dispatches to the
   // StickC red GPIO or the Cardputer NeoPixel; both clear on (0,0,0).
-  if (activeState == P_ATTENTION && settings().led) {
+  if (shepAttention && settings().led) {
+    bool on = (now / 400) % 2;
+    halLedSet(on ? 220 : 0, on ? 60 : 0, 0);   // amber, matching the screen
+  } else if (activeState == P_ATTENTION && settings().led) {
     bool on = (now / 400) % 2;
     halLedSet(on ? 180 : 0, on ? 40 : 0, 0);   // red-orange pulse
   } else {
@@ -1552,7 +1574,13 @@ void loop() {
   while (true) {
     HalKey k = halPollKey();
     if (k == HalKey::None) break;
+    const bool wokeIt = screenOff;
     wake();
+    // The keypress that lights the screen does not also press what was on
+    // it. Between the 15s blackout and the lock there is a window where the
+    // device is dark and live, and reaching into a pocket should not answer
+    // a prompt nobody has read.
+    if (wokeIt && shepherdUiActive()) continue;
 
     // Re-evaluate inPrompt here: Enter fires both BtnA (which approves
     // above) and HalKey::Approve (this loop). If we trusted the outer
@@ -1815,10 +1843,15 @@ void loop() {
   // millis() not the cached `now`: wake() runs after `now` is captured,
   // so now - lastInteractMs underflows when a button is held → flicker.
   // No auto-off on USB power — clock face wants to stay visible while charging.
-  if (!screenOff && !inPrompt && !_onUsb
-      && millis() - lastInteractMs > SCREEN_OFF_MS) {
+  const bool shep = shepherdUiActive();
+  const uint32_t offAfter = shep ? SHEPHERD_SCREEN_OFF_MS : SCREEN_OFF_MS;
+  if (!screenOff && !inPrompt && (shep || !_onUsb)
+      && millis() - lastInteractMs > offAfter) {
     halScreenPower(false);
     screenOff = true;
+    // Dark means locked. One rule instead of two timers, and it closes the
+    // window where the screen is off but the keys are still live.
+    if (shep) shepherdUiLock();
   }
 
   delay(screenOff ? 100 : 16);

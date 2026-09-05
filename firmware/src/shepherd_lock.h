@@ -77,6 +77,15 @@ struct ShepherdLock {
     return true;
   }
 
+  // Lock now, without waiting out the idle window. Called when the screen
+  // goes dark: a device you cannot see is a device you must not be able to
+  // answer blind, and "dark means locked" is one rule instead of two timers
+  // the reader has to hold in their head.
+  void lock(uint32_t now) {
+    _locked = true;
+    _lastKeyMs = now;
+  }
+
   // Any key at all arrived. Keeps an unlocked device awake while it is being
   // read, without ever unlocking one.
   void touch(uint32_t now) {

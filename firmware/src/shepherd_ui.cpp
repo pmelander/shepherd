@@ -114,6 +114,17 @@ static char g_lastShowable[SHEPHERD_PANE_LEN] = {0};
 // seconds, which is roughly how long it takes to focus on the screen anyway.
 #define SH_TYPE_MS 40
 
+// How often to speak up again about an agent that is still blocked and still
+// unseen. Long enough not to be a nag, short enough that walking back into
+// the room gets you told.
+#define SHEPHERD_NAG_MS 60000
+
+// The pane the alarm last fired for, and when. Keyed by pane rather than by
+// a bool so a SECOND agent blocking while the first is still waiting gets its
+// own alarm - that is new information, not a repeat.
+static char g_alarmedPane[SHEPHERD_PANE_LEN] = {0};
+static uint32_t g_alarmedAt = 0;
+
 // Colours chosen for a 240x135 IPS at arm's length: high contrast, few hues,
 // and status carried by colour AND text so it survives being glanced at.
 static const uint16_t C_BG      = 0x0000;
@@ -227,6 +238,31 @@ bool shepherdUiNeedsAttention() {
   // stopped and still wants you. "You must open the laptop" is attention too.
   return g_frame.firstShowable() >= 0;
 }
+
+bool shepherdUiTakeAlarm(bool unseen) {
+  if (!g_everReceived) return false;
+  const int idx = (stale() || g_badVersion) ? -1 : g_frame.firstShowable();
+  if (idx < 0) {
+    // Nothing waiting. Forget what we alarmed about, so the same agent
+    // blocking again later is news again.
+    g_alarmedPane[0] = 0;
+    return false;
+  }
+  const uint32_t now = millis();
+  if (strcmp(g_frame.agents[idx].pane, g_alarmedPane) != 0) {
+    strncpy(g_alarmedPane, g_frame.agents[idx].pane, sizeof(g_alarmedPane) - 1);
+    g_alarmedPane[sizeof(g_alarmedPane) - 1] = 0;
+    g_alarmedAt = now;
+    return true;
+  }
+  if (unseen && (uint32_t)(now - g_alarmedAt) >= SHEPHERD_NAG_MS) {
+    g_alarmedAt = now;
+    return true;
+  }
+  return false;
+}
+
+void shepherdUiLock() { g_lock.lock(millis()); }
 
 // ---------------------------------------------------------------- output
 
