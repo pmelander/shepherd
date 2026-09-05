@@ -10,6 +10,7 @@ testable without Herdr running and without the device attached:
     transport.py  the BLE link; chunking and reassembly
     prompt.py   reading a permission prompt, choosing which keys to send
     actions.py  the send-time safety layer: re-verify, or refuse
+    runner.py   the relay: composes all of the above and runs
 """
 
 from .models import Agent, AgentStatus, HerdSnapshot, is_pane_id
@@ -33,6 +34,7 @@ from .actions import (
 )
 from .frame import PROTOCOL_VERSION, FrameBuilder
 from .prompt import PromptError, parse_prompt, plan_approve, plan_deny
+from .runner import Runner
 from .transport import BleTransport, Transport, TransportError
 from .herdr import (
     CliHerdrSource,
@@ -75,4 +77,5 @@ __all__ = [
     "BleTransport",
     "Transport",
     "TransportError",
+    "Runner",
 ]

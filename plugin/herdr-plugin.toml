@@ -28,6 +28,6 @@ command = ["py", "-3", "start.py", "--mode", "startup"]
 # without waiting for a server restart, and later becomes the relay restart.
 [[actions]]
 id = "probe-env"
-title = "Shepherd: capture plugin environment"
+title = "Shepherd: dump plugin environment"
 contexts = ["global"]
-command = ["py", "-3", "start.py", "--mode", "action"]
+command = ["py", "-3", "start.py", "--probe-env"]

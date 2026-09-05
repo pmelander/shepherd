@@ -40,3 +40,6 @@ desktop.ini
 # Probe artefacts (plugin environment captures)
 .probe3-env.jsonl
 plugin/.probe3-env.jsonl
+
+# Relay state when run outside Herdr (normally HERDR_PLUGIN_STATE_DIR)
+plugin/.state/
