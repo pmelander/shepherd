@@ -41,6 +41,8 @@
 #define SHEPHERD_QUESTION_LEN 128
 #define SHEPHERD_DECISION_LEN 16
 #define SHEPHERD_WHY_LEN 84
+#define SHEPHERD_TS_LEN 24
+#define SHEPHERD_MAC_LEN 17   // 16 hex chars + NUL
 
 struct ShepherdAgent {
   char pane[SHEPHERD_PANE_LEN];
@@ -71,6 +73,10 @@ enum ShepherdParse {
 
 struct ShepherdFrame {
   ShepherdAgent agents[SHEPHERD_MAX_AGENTS];
+  // The frame's own timestamp, echoed back in every action so the relay can
+  // bind a signature to a frame it actually sent. Without it, `focus` - which
+  // carries no decision id - would be replayable forever.
+  char ts[SHEPHERD_TS_LEN];
   int count;
   int more;              // agents the host had but did not send
   int version;
@@ -78,6 +84,7 @@ struct ShepherdFrame {
   bool degraded;
 
   void clear() {
+    ts[0] = 0;
     count = 0;
     more = 0;
     version = 0;
@@ -121,6 +128,7 @@ inline ShepherdParse shepherdParse(const char* line, ShepherdFrame* out) {
   if (!t || strcmp(t, "snap") != 0) return SHEPHERD_NOT_MINE;
 
   out->clear();
+  _shCopy(out->ts, sizeof(out->ts), doc["ts"] | (const char*)nullptr);
   out->version = doc["v"] | 0;
   if (out->version != SHEPHERD_PROTOCOL_VERSION) return SHEPHERD_BAD_VERSION;
 
@@ -160,19 +168,43 @@ inline ShepherdParse shepherdParse(const char* line, ShepherdFrame* out) {
   return SHEPHERD_OK;
 }
 
+// The exact bytes both sides sign. Mirrors canonical_message() in
+// plugin/shepherd/auth.py, and the two diverging is the most likely way
+// signing breaks — so it is built here, in the natively-testable header,
+// rather than inline wherever the HMAC happens.
+//
+// An absent decision id is an EMPTY FIELD, not a missing one: `focus` carries
+// no id, and dropping the separator would let it collide with a different
+// action's message.
+inline size_t shepherdCanonicalMessage(char* buf, size_t cap, const char* ts,
+                                       const char* pane, const char* action,
+                                       const char* decision) {
+  if (!buf || !ts || !pane || !action || !*ts || !*pane || !*action) return 0;
+  int n = snprintf(buf, cap, "%s|%s|%s|%s", ts, pane, action,
+                   (decision && *decision) ? decision : "");
+  if (n < 0 || (size_t)n >= cap) return 0;
+  return (size_t)n;
+}
+
 // Build a device -> host action frame. Returns the length written, or 0 if it
 // would not fit or the inputs are unusable.
+//
+// `ts` and `mac` are optional. A relay configured with a secret refuses
+// frames without them; leaving them off is how a device is brought up before
+// its firmware carries one.
 inline size_t shepherdBuildAct(char* buf, size_t cap, const char* pane,
-                               const char* action, const char* decision) {
+                               const char* action, const char* decision,
+                               const char* ts = nullptr,
+                               const char* mac = nullptr) {
   if (!buf || !pane || !action || !*pane || !*action) return 0;
-  int n;
-  if (decision && *decision) {
-    n = snprintf(buf, cap, "{\"t\":\"act\",\"i\":\"%s\",\"k\":\"%s\",\"r\":\"%s\"}\n",
-                 pane, action, decision);
-  } else {
-    n = snprintf(buf, cap, "{\"t\":\"act\",\"i\":\"%s\",\"k\":\"%s\"}\n",
-                 pane, action);
-  }
+  char rpart[SHEPHERD_DECISION_LEN + 8] = {0};
+  if (decision && *decision)
+    snprintf(rpart, sizeof(rpart), ",\"r\":\"%s\"", decision);
+  char spart[SHEPHERD_TS_LEN + SHEPHERD_MAC_LEN + 24] = {0};
+  if (ts && *ts && mac && *mac)
+    snprintf(spart, sizeof(spart), ",\"ts\":\"%s\",\"mac\":\"%s\"", ts, mac);
+  int n = snprintf(buf, cap, "{\"t\":\"act\",\"i\":\"%s\",\"k\":\"%s\"%s%s}\n",
+                   pane, action, rpart, spart);
   if (n < 0 || (size_t)n >= cap) return 0;
   return (size_t)n;
 }

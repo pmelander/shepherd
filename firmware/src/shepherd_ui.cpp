@@ -1,8 +1,76 @@
 #include "shepherd_ui.h"
 
 #include <Arduino.h>
+#include <mbedtls/md.h>
 
 #include "ble_bridge.h"
+
+// ---------------------------------------------------------------- signing
+//
+// The BLE bond proves the peer is a device Windows once paired with. It does
+// not prove it is this firmware, because Just Works gives no MITM protection
+// — bleak cannot run a passkey ceremony. So every action carries a MAC over
+// the canonical message, keyed by a secret baked in at build time.
+//
+// The primitive is mbedtls, which ships with the ESP32 core and is far better
+// tested than anything worth hand-rolling here. What IS worth testing is the
+// message being signed, and that lives in shepherd_frame.h where the native
+// suite can reach it — the two sides disagreeing about the message is the
+// realistic failure, not a broken SHA-256.
+//
+// Without -DSHEPHERD_SECRET the device sends unsigned frames, which a relay
+// holding a secret refuses. That is the bring-up path, not a fallback.
+#ifndef SHEPHERD_SECRET
+#define SHEPHERD_SECRET ""
+#endif
+
+static bool hexToBytes(const char* hex, uint8_t* out, size_t outCap, size_t* outLen) {
+  size_t n = strlen(hex);
+  if (n == 0 || n % 2 || n / 2 > outCap) return false;
+  for (size_t i = 0; i < n; i += 2) {
+    char pair[3] = {hex[i], hex[i + 1], 0};
+    char* end = nullptr;
+    long v = strtol(pair, &end, 16);
+    if (end != pair + 2) return false;
+    out[i / 2] = (uint8_t)v;
+  }
+  *outLen = n / 2;
+  return true;
+}
+
+// Writes SHEPHERD_MAC_LEN-1 lowercase hex characters plus a NUL. Returns
+// false when no secret is configured, which the caller reports rather than
+// silently sending an unsigned frame.
+static bool signMessage(const char* msg, size_t msgLen, char* out, size_t cap) {
+  static uint8_t key[32];
+  static size_t keyLen = 0;
+  static bool tried = false;
+  if (!tried) {
+    tried = true;
+    if (!hexToBytes(SHEPHERD_SECRET, key, sizeof(key), &keyLen)) keyLen = 0;
+  }
+  if (keyLen == 0 || cap < SHEPHERD_MAC_LEN) return false;
+
+  uint8_t digest[32];
+  const mbedtls_md_info_t* info = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+  if (!info) return false;
+  if (mbedtls_md_hmac(info, key, keyLen, (const uint8_t*)msg, msgLen, digest) != 0)
+    return false;
+
+  // Truncated to 64 bits for the wire: an attacker must already hold a BLE
+  // bond and guess against a relay that logs every refusal, and the link
+  // sometimes negotiates a 20-byte payload.
+  // Not named HEX: Arduino's Print.h does `#define HEX 16`, and the collision
+  // reports as "invalid types 'int[int]' for array subscript", which points
+  // nowhere near the actual cause.
+  static const char* HEXDIGITS = "0123456789abcdef";
+  for (int i = 0; i < (SHEPHERD_MAC_LEN - 1) / 2; i++) {
+    out[i * 2] = HEXDIGITS[digest[i] >> 4];
+    out[i * 2 + 1] = HEXDIGITS[digest[i] & 0x0F];
+  }
+  out[SHEPHERD_MAC_LEN - 1] = 0;
+  return true;
+}
 
 // ---------------------------------------------------------------- state
 
@@ -257,11 +325,30 @@ void shepherdUiDraw(M5Canvas& spr, int W, int H) {
 // ---------------------------------------------------------------- actions
 
 static void sendAct(const ShepherdAgent& a, const char* action) {
-  char buf[192];
-  size_t n = shepherdBuildAct(buf, sizeof(buf), a.pane, action, a.decision);
+  // Sign against the timestamp of the frame currently on screen. The relay
+  // only accepts a frame it recently sent, so a captured action stops working
+  // once the herd moves on — which is the only replay protection `focus` has.
+  char msg[SHEPHERD_TS_LEN + SHEPHERD_PANE_LEN + SHEPHERD_DECISION_LEN + 32];
+  char mac[SHEPHERD_MAC_LEN] = {0};
+  bool signedOk = false;
+  size_t mlen = shepherdCanonicalMessage(msg, sizeof(msg), g_frame.ts,
+                                         a.pane, action, a.decision);
+  if (mlen) signedOk = signMessage(msg, mlen, mac, sizeof(mac));
+
+  char buf[256];
+  size_t n = signedOk
+      ? shepherdBuildAct(buf, sizeof(buf), a.pane, action, a.decision,
+                         g_frame.ts, mac)
+      : shepherdBuildAct(buf, sizeof(buf), a.pane, action, a.decision);
   if (!n) { note("frame too long"); return; }
   if (!bleConnected()) { note("not connected"); return; }
   bleWrite((const uint8_t*)buf, n);
+  if (!signedOk) {
+    // Visible rather than silent: an unsigned frame will be refused by any
+    // relay configured with a secret, and "nothing happened" is the worst
+    // possible explanation for that.
+    note("unsigned - check build");
+  }
 }
 
 bool shepherdUiKey(HalKey k) {

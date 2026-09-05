@@ -199,14 +199,15 @@ class _Gate:
     def __init__(self):
         self.frames = []
 
-    def observe_frame(self, pane_ids, pending):
-        self.frames.append((set(pane_ids), dict(pending)))
+    def observe_frame(self, pane_ids, pending, ts=None):
+        self.frames.append((set(pane_ids), dict(pending), ts))
 
 
 def test_push_loop_sends_on_change_then_holds():
     src = FakeSource([HerdSnapshot(agents=(agent(seq=1),))])
     t = FakeTransport()
-    r, clock, _ = make(src, transport=t, tick=1.0, keepalive=10.0, poll_interval=30.0)
+    r, clock, _ = make(src, transport=t, tick=1.0, keepalive=10.0,
+                       poll_interval=30.0, require_signatures=False)
     gate = _Gate()
 
     async def scenario():
@@ -223,6 +224,9 @@ def test_push_loop_sends_on_change_then_holds():
     # At least the first frame goes out, and the gate is told about it.
     assert len(t.sent) >= 1
     assert gate.frames and gate.frames[0][0] == {"w2:p1"}
+    # The gate is told which frame it was, so a signed action can be bound to
+    # a frame the relay actually sent.
+    assert gate.frames[0][2], "observe_frame must carry the frame timestamp"
 
 
 def test_keepalive_is_below_the_device_staleness_threshold():

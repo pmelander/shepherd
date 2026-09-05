@@ -22,10 +22,15 @@ Layered with it:
   something it showed you in full.
 * Every attempt is appended to an audit log, including the refusals.
 
-Not yet implemented: the app-layer HMAC on the action frame described in the
-design. It needs a secret bootstrapped into the firmware at build time and a
-matching verifier here. Until that lands, the BLE bond is the only thing
-authenticating the peer, and the guards above are what bound the damage.
+* Every frame is signed. The bond proves the peer is a device Windows once
+  paired with; it does not prove it is this Cardputer, because Just Works
+  gives no MITM protection. A MAC over `ts|pane|action|decision`, keyed by a
+  secret the relay generates and the firmware is built with, does. See
+  `auth.py`.
+
+Signature checking comes first, before the allowlist and before anything is
+read. A peer that cannot sign should not be able to make the relay do work,
+including the work of reading a pane.
 """
 
 from __future__ import annotations
@@ -36,8 +41,10 @@ import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Mapping
+from collections import deque
+from typing import Callable, Deque, Mapping
 
+from .auth import verify as verify_mac
 from .herdr import HerdrError, HerdrSource
 from .models import is_pane_id
 from .prompt import PromptError, parse_prompt, plan_approve, plan_deny
@@ -68,6 +75,9 @@ class Refusal(str, enum.Enum):
     PROMPT_CHANGED = "the prompt changed since it was shown"
     UNSAFE_OPTIONS = "no safe option to select"
     HERDR_FAILED = "herdr rejected the keys"
+    BAD_MAC = "signature did not verify"
+    STALE_TS = "signed against a frame we no longer recognise"
+    UNSIGNED = "no signature, and this relay requires one"
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,6 +87,11 @@ class ActionRequest:
     pane_id: str
     action: Action
     decision_id: str | None = None
+    # The timestamp of the frame the device was answering, echoed back, and
+    # the MAC over it. Both absent on an unsigned frame, which a relay holding
+    # a secret refuses.
+    ts: str | None = None
+    mac: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,7 +133,14 @@ def parse_action(raw: object) -> ActionRequest | None:
         not isinstance(decision_id, str) or not decision_id.isalnum()
     ):
         return None
-    return ActionRequest(pane_id=pane_id, action=action, decision_id=decision_id)
+    ts = raw.get("ts")
+    mac = raw.get("mac")
+    if ts is not None and not isinstance(ts, str):
+        return None
+    if mac is not None and not isinstance(mac, str):
+        return None
+    return ActionRequest(pane_id=pane_id, action=action, decision_id=decision_id,
+                         ts=ts, mac=mac)
 
 
 def fingerprint(prompt_text: str | None) -> str:
@@ -155,14 +177,22 @@ class ActionGate:
     source: HerdrSource
     now: Callable[[], datetime] = lambda: datetime.now(timezone.utc)
     audit: Path | None = None
+    # None disables signature checking. Only for tests and for bringing a new
+    # device up before its firmware carries the secret; the relay logs loudly.
+    secret: bytes | None = None
     _allowed: frozenset[str] = field(default_factory=frozenset, init=False)
     _pending: dict[str, PendingDecision] = field(default_factory=dict, init=False)
     _burned: set[str] = field(default_factory=set, init=False)
+    # A few frames' worth of timestamps. More than one because a thumb is
+    # slower than a keepalive: answering a question you have been reading for
+    # fifteen seconds must still work.
+    _recent_ts: Deque[str] = field(default_factory=lambda: deque(maxlen=6), init=False)
 
     # -- state kept in step with what the device is showing ----------------
 
     def observe_frame(
-        self, pane_ids: frozenset[str], pending: Mapping[str, PendingDecision]
+        self, pane_ids: frozenset[str], pending: Mapping[str, PendingDecision],
+        ts: str | None = None,
     ) -> None:
         """Record what the device now has on screen.
 
@@ -172,10 +202,33 @@ class ActionGate:
         """
         self._allowed = frozenset(p for p in pane_ids if is_pane_id(p))
         self._pending = dict(pending)
+        if ts and ts not in self._recent_ts:
+            self._recent_ts.append(ts)
 
     # -- dispatch ----------------------------------------------------------
 
+    def _authentic(self, req: ActionRequest) -> Refusal | None:
+        if self.secret is None:
+            return None
+        if not req.mac or not req.ts:
+            return Refusal.UNSIGNED
+        if req.ts not in self._recent_ts:
+            # Binding to a frame we actually sent is what stops a captured
+            # frame being replayed later. It is the only replay protection
+            # `focus` has, since it carries no decision id.
+            return Refusal.STALE_TS
+        if not verify_mac(self.secret, req.mac, req.ts, req.pane_id,
+                          req.action.value, req.decision_id):
+            return Refusal.BAD_MAC
+        return None
+
     async def dispatch(self, req: ActionRequest) -> ActionResult:
+        # Before the allowlist and before any pane is read: an unauthenticated
+        # peer should not be able to make the relay do work on its behalf.
+        bad = self._authentic(req)
+        if bad is not None:
+            return self._refuse(req, bad)
+
         if req.pane_id not in self._allowed:
             return self._refuse(req, Refusal.UNKNOWN_PANE)
 

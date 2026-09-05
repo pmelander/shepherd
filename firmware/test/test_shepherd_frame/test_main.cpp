@@ -184,6 +184,68 @@ void test_act_frame_refuses_empty_inputs(void) {
     TEST_ASSERT_EQUAL(0, (int)shepherdBuildAct(buf, sizeof(buf), nullptr, "approve", "r"));
 }
 
+
+// ------------------------------------------------- canonical message + mac
+// These mirror plugin/shepherd/auth.py exactly. The two sides diverging is
+// the most likely way signing breaks, and it would break silently: every
+// real action would simply be refused as a bad signature.
+
+void test_canonical_message_shape(void) {
+    char buf[128];
+    size_t n = shepherdCanonicalMessage(buf, sizeof(buf),
+        "2026-09-05T12:30:00Z", "w9:p1", "approve", "abc123");
+    TEST_ASSERT_TRUE(n > 0);
+    TEST_ASSERT_EQUAL_STRING("2026-09-05T12:30:00Z|w9:p1|approve|abc123", buf);
+}
+
+void test_absent_decision_is_an_empty_field(void) {
+    // focus carries no decision id. Dropping the separator instead of
+    // emptying the field would let it collide with another action's message.
+    char a[128], b[128];
+    shepherdCanonicalMessage(a, sizeof(a), "T", "w9:p1", "focus", nullptr);
+    shepherdCanonicalMessage(b, sizeof(b), "T", "w9:p1", "focus", "");
+    TEST_ASSERT_EQUAL_STRING("T|w9:p1|focus|", a);
+    TEST_ASSERT_EQUAL_STRING(a, b);
+}
+
+void test_canonical_message_refuses_bad_input(void) {
+    char buf[128];
+    TEST_ASSERT_EQUAL(0, (int)shepherdCanonicalMessage(buf, sizeof(buf), "", "w9:p1", "approve", "r"));
+    TEST_ASSERT_EQUAL(0, (int)shepherdCanonicalMessage(buf, sizeof(buf), "T", "", "approve", "r"));
+    TEST_ASSERT_EQUAL(0, (int)shepherdCanonicalMessage(buf, sizeof(buf), "T", "w9:p1", "", "r"));
+    char tiny[8];
+    TEST_ASSERT_EQUAL(0, (int)shepherdCanonicalMessage(tiny, sizeof(tiny),
+        "2026-09-05T12:30:00Z", "w9:p1", "approve", "abc123"));
+}
+
+void test_frame_carries_its_timestamp(void) {
+    const char* line = "{\"t\":\"snap\",\"v\":1,\"ts\":\"2026-09-05T12:30:00Z\",\"a\":["
+                       "{\"i\":\"w2:p1\",\"n\":\"x\",\"s\":\"idle\"}]}";
+    TEST_ASSERT_EQUAL(SHEPHERD_OK, shepherdParse(line, &f));
+    TEST_ASSERT_EQUAL_STRING("2026-09-05T12:30:00Z", f.ts);
+}
+
+void test_signed_act_frame_carries_ts_and_mac(void) {
+    char buf[192];
+    size_t n = shepherdBuildAct(buf, sizeof(buf), "w9:p1", "approve", "abc123",
+                                "2026-09-05T12:30:00Z", "0011223344556677");
+    TEST_ASSERT_TRUE(n > 0);
+    TEST_ASSERT_EQUAL_STRING(
+        "{\"t\":\"act\",\"i\":\"w9:p1\",\"k\":\"approve\",\"r\":\"abc123\","
+        "\"ts\":\"2026-09-05T12:30:00Z\",\"mac\":\"0011223344556677\"}\n", buf);
+}
+
+void test_unsigned_act_frame_omits_both_fields(void) {
+    // Half a signature is worse than none: the relay would refuse it as
+    // malformed rather than as unsigned, which is a confusing log line.
+    char buf[192];
+    shepherdBuildAct(buf, sizeof(buf), "w2:p1", "focus", nullptr,
+                     "2026-09-05T12:30:00Z", nullptr);
+    TEST_ASSERT_EQUAL_STRING("{\"t\":\"act\",\"i\":\"w2:p1\",\"k\":\"focus\"}\n", buf);
+    shepherdBuildAct(buf, sizeof(buf), "w2:p1", "focus", nullptr, nullptr, "aabb");
+    TEST_ASSERT_EQUAL_STRING("{\"t\":\"act\",\"i\":\"w2:p1\",\"k\":\"focus\"}\n", buf);
+}
+
 int main(int, char**) {
     UNITY_BEGIN();
     RUN_TEST(test_ignores_frames_that_are_not_shepherds);
@@ -202,5 +264,11 @@ int main(int, char**) {
     RUN_TEST(test_act_frame_without_a_decision_id);
     RUN_TEST(test_act_frame_refuses_to_overflow_its_buffer);
     RUN_TEST(test_act_frame_refuses_empty_inputs);
+    RUN_TEST(test_canonical_message_shape);
+    RUN_TEST(test_absent_decision_is_an_empty_field);
+    RUN_TEST(test_canonical_message_refuses_bad_input);
+    RUN_TEST(test_frame_carries_its_timestamp);
+    RUN_TEST(test_signed_act_frame_carries_ts_and_mac);
+    RUN_TEST(test_unsigned_act_frame_omits_both_fields);
     return UNITY_END();
 }

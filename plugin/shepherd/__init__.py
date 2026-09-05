@@ -11,6 +11,7 @@ testable without Herdr running and without the device attached:
     prompt.py   reading a permission prompt, choosing which keys to send
     actions.py  the send-time safety layer: re-verify, or refuse
     runner.py   the relay: composes all of the above and runs
+    auth.py     the shared secret and the action-frame signature
 """
 
 from .models import Agent, AgentStatus, HerdSnapshot, is_pane_id
@@ -32,6 +33,7 @@ from .actions import (
     fingerprint,
     parse_action,
 )
+from .auth import build_flag, load_or_create_secret, sign, verify
 from .frame import PROTOCOL_VERSION, FrameBuilder
 from .prompt import PromptError, parse_prompt, plan_approve, plan_deny
 from .runner import Runner
@@ -78,4 +80,8 @@ __all__ = [
     "Transport",
     "TransportError",
     "Runner",
+    "load_or_create_secret",
+    "sign",
+    "verify",
+    "build_flag",
 ]

@@ -43,3 +43,6 @@ plugin/.probe3-env.jsonl
 
 # Relay state when run outside Herdr (normally HERDR_PLUGIN_STATE_DIR)
 plugin/.state/
+
+# The firmware build flag holding the shared HMAC secret
+firmware/secret.ini

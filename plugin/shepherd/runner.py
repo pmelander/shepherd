@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Awaitable, Callable, Mapping
 
 from .actions import ActionGate, PendingDecision, fingerprint, parse_action
+from .auth import load_or_create_secret
 from .events import EventStreamError, PipeEventSource
 from .frame import FrameBuilder
 from .herdr import CliHerdrSource, HerdrSource
@@ -106,6 +107,10 @@ class Runner:
     keepalive: float = KEEPALIVE
     tick: float = TICK
     use_events: bool = True
+    # None means unsigned, which the gate allows but logs loudly. The default
+    # is to load (and on first run generate) the shared secret.
+    secret: bytes | None = None
+    require_signatures: bool = True
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
     clock: Callable[[], float] = lambda: asyncio.get_event_loop().time()
 
@@ -215,7 +220,7 @@ class Runner:
                 await self.sleep(next(delays))
 
     async def _serve(self, transport: Transport) -> None:
-        gate = ActionGate(source=self.source)
+        gate = ActionGate(source=self.source, secret=self._secret())
         tasks = [
             asyncio.create_task(self._push_loop(transport, gate)),
             asyncio.create_task(self._action_loop(transport, gate)),
@@ -235,6 +240,14 @@ class Runner:
                 t.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
 
+    def _secret(self) -> bytes | None:
+        if not self.require_signatures:
+            log.warning("signature checking DISABLED; any bonded peer can act")
+            return None
+        if self.secret is None:
+            self.secret = load_or_create_secret()
+        return self.secret
+
     async def _push_loop(self, transport: Transport, gate: ActionGate) -> None:
         last_poll = -1e9
         last_send = -1e9
@@ -251,7 +264,8 @@ class Runner:
                 # Only after the device has it does the gate consider those
                 # panes answerable.
                 gate.observe_frame(
-                    frozenset(r["i"] for r in frame.get("a", [])), pending
+                    frozenset(r["i"] for r in frame.get("a", [])), pending,
+                    ts=frame.get("ts"),
                 )
                 self._dirty = False
                 last_send = now
