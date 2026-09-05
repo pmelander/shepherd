@@ -119,10 +119,13 @@ static char g_lastShowable[SHEPHERD_PANE_LEN] = {0};
 // the room gets you told.
 #define SHEPHERD_NAG_MS 60000
 
-// The pane the alarm last fired for, and when. Keyed by pane rather than by
-// a bool so a SECOND agent blocking while the first is still waiting gets its
-// own alarm - that is new information, not a repeat.
+// The pane the alarm last fired for, what kind it was, and when. Keyed by
+// pane rather than by a bool so a SECOND agent arriving while the first still
+// waits gets its own alarm - that is new information, not a repeat. Keyed by
+// kind too, so the same agent going done after blocked rings again: it did
+// two different things.
 static char g_alarmedPane[SHEPHERD_PANE_LEN] = {0};
+static ShepherdAlarm g_alarmedKind = ShepherdAlarm::None;
 static uint32_t g_alarmedAt = 0;
 
 // Colours chosen for a 240x135 IPS at arm's length: high contrast, few hues,
@@ -229,37 +232,57 @@ bool shepherdUiActive() {
   return g_everReceived;
 }
 
-bool shepherdUiNeedsAttention() {
+// Which agent is asking for a human, and how loudly. Blocked outranks done:
+// someone is waiting on you, versus something is waiting for you.
+static int attentionIndex(ShepherdAlarm* kind) {
+  *kind = ShepherdAlarm::None;
   // Deliberately blind to the lock. The lock governs what a key may DO, not
   // whether you get told — a locked device that stayed quiet about a blocked
   // agent would be a worse device, not a safer one.
-  if (stale() || g_badVersion) return false;
+  if (!g_everReceived || stale() || g_badVersion) return -1;
   // Showable, not answerable: an agent whose question was truncated still
   // stopped and still wants you. "You must open the laptop" is attention too.
-  return g_frame.firstShowable() >= 0;
+  int i = g_frame.firstShowable();
+  if (i >= 0) { *kind = ShepherdAlarm::Blocked; return i; }
+  i = g_frame.firstDone();
+  if (i >= 0) { *kind = ShepherdAlarm::Done; return i; }
+  return -1;
 }
 
-bool shepherdUiTakeAlarm(bool unseen) {
-  if (!g_everReceived) return false;
-  const int idx = (stale() || g_badVersion) ? -1 : g_frame.firstShowable();
+ShepherdAlarm shepherdUiAttention() {
+  ShepherdAlarm kind;
+  attentionIndex(&kind);
+  return kind;
+}
+
+ShepherdAlarm shepherdUiTakeAlarm(bool unseen) {
+  ShepherdAlarm kind;
+  const int idx = attentionIndex(&kind);
   if (idx < 0) {
     // Nothing waiting. Forget what we alarmed about, so the same agent
-    // blocking again later is news again.
+    // arriving again later is news again.
     g_alarmedPane[0] = 0;
-    return false;
+    g_alarmedKind = ShepherdAlarm::None;
+    return ShepherdAlarm::None;
   }
   const uint32_t now = millis();
-  if (strcmp(g_frame.agents[idx].pane, g_alarmedPane) != 0) {
+  if (kind != g_alarmedKind ||
+      strcmp(g_frame.agents[idx].pane, g_alarmedPane) != 0) {
     strncpy(g_alarmedPane, g_frame.agents[idx].pane, sizeof(g_alarmedPane) - 1);
     g_alarmedPane[sizeof(g_alarmedPane) - 1] = 0;
+    g_alarmedKind = kind;
     g_alarmedAt = now;
-    return true;
+    return kind;
   }
-  if (unseen && (uint32_t)(now - g_alarmedAt) >= SHEPHERD_NAG_MS) {
+  // Only a blocked agent nags. Something that merely finished has said its
+  // piece; repeating it every minute would train you to ignore the sound
+  // that also means "somebody is waiting".
+  if (unseen && kind == ShepherdAlarm::Blocked &&
+      (uint32_t)(now - g_alarmedAt) >= SHEPHERD_NAG_MS) {
     g_alarmedAt = now;
-    return true;
+    return kind;
   }
-  return false;
+  return ShepherdAlarm::None;
 }
 
 void shepherdUiLock() { g_lock.lock(millis()); }

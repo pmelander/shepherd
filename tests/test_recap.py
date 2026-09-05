@@ -118,13 +118,24 @@ def test_blank_lines_inside_a_block_do_not_end_it():
     assert "Both commits" in extract_answer(ANSWER)
 
 
-def test_a_long_answer_is_cut_on_a_word_boundary():
-    long = "● " + " ".join(["migration"] * 200)
+def test_a_long_answer_keeps_its_ending_not_its_beginning():
+    # An answer opens with what the agent did and closes with what it
+    # concluded and what it needs next. On a screen that holds only part of
+    # it, the useful part is the part you would have scrolled to.
+    long = "● " + "preamble " * 300 + "and the actual conclusion goes here."
     body = extract_answer(long)
     assert len(body) <= BODY_MAX
-    assert body.endswith("...")
-    assert "migratio..." not in body, "cut mid-word"
+    assert body.startswith("...")
+    assert body.endswith("and the actual conclusion goes here.")
+
+
+def test_the_cut_lands_on_a_word_boundary():
+    body = truncate_body("alpha bravo charlie delta echo foxtrot", 20)
+    assert len(body) <= 20
+    assert body.startswith("...")
+    assert body.endswith("foxtrot")
+    assert "harlie" not in body, "cut mid-word"
 
     # ...unless honouring the word boundary would cost most of a line.
-    assert truncate_body("a" * 300, 100).endswith("...")
+    assert truncate_body("a" * 300, 100).startswith("...")
     assert len(truncate_body("a" * 300, 100)) == 100

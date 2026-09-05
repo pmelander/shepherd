@@ -153,6 +153,23 @@ struct ShepherdFrame {
       if (agents[i].isBlocked() && agents[i].hasQuestion) return i;
     return -1;
   }
+
+  // First agent that has finished and not been looked at, or -1.
+  //
+  // Herdr draws `done` and `idle` from the same readiness state and splits
+  // them on whether the tab has been SEEN — so `done` means "finished, and
+  // you have not looked yet". That is the notification this device exists
+  // for at least as much as `blocked` is: an agent finishing in a workspace
+  // you are not watching is the common event, and blocking is the rare one.
+  //
+  // A focused tab never reaches `done`, which is correct and worth knowing
+  // before wondering why nothing fired: if you were looking at it, you have
+  // already been told.
+  int firstDone(int from = 0) const {
+    for (int i = from; i < count; i++)
+      if (agents[i].isDone()) return i;
+    return -1;
+  }
 };
 
 // Copy a JSON string field into a fixed buffer, always NUL-terminated.

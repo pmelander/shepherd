@@ -71,6 +71,12 @@ void halBeep(uint16_t freq, uint16_t durMs);
 // arrays must outlive the sequence (use static const tables). Caller
 // checks its own mute / settings.sound gate before dispatching.
 void halBeepSeq(const uint16_t* freqs, const uint16_t* durs, uint8_t n);
+// Playback volume, 0-255, applied to everything queued after it. Set before
+// halBeepSeq rather than per note: the sequencer plays its notes over the
+// following few hundred milliseconds, so a volume restored immediately after
+// queueing would only apply to the first one.
+// No-op on StickC, whose passive buzzer has no volume control.
+void halBeepVolume(uint8_t v);
 
 // ---------------------------------------------------------------------------
 // IMU

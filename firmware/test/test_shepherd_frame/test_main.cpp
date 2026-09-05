@@ -163,6 +163,49 @@ void test_showable_includes_the_ones_you_cannot_answer(void) {
     TEST_ASSERT_EQUAL(2, f.firstShowable(1));
 }
 
+void test_done_is_found_separately_from_blocked(void) {
+    // `done` means finished AND not looked at - Herdr splits it from `idle`
+    // on whether the tab has been seen. It is the notification this device
+    // exists for at least as much as blocked is, and for a long time the
+    // alarm fired only for blocked, so a finished agent said nothing at all.
+    const char* line =
+      "{\"t\":\"snap\",\"v\":2,\"a\":["
+      "{\"i\":\"w1:p1\",\"n\":\"a\",\"s\":\"idle\"},"
+      "{\"i\":\"w2:p1\",\"n\":\"b\",\"s\":\"working\"},"
+      "{\"i\":\"w3:p1\",\"n\":\"c\",\"s\":\"done\"},"
+      "{\"i\":\"w4:p1\",\"n\":\"d\",\"s\":\"done\"}]}";
+    TEST_ASSERT_EQUAL(SHEPHERD_OK, shepherdParse(line, &f));
+    TEST_ASSERT_EQUAL(2, f.firstDone());
+    TEST_ASSERT_EQUAL(3, f.firstDone(3));
+    TEST_ASSERT_EQUAL(-1, f.firstDone(4));
+    // Nothing to answer, so the queue stays empty and the herd list shows.
+    TEST_ASSERT_EQUAL(-1, f.firstShowable());
+}
+
+void test_idle_is_not_done_and_must_never_ring(void) {
+    // A focused tab never reaches `done` - Herdr reports it as idle, because
+    // you were already looking. Treating the two alike would make the device
+    // chirp about the pane in front of you.
+    const char* line = "{\"t\":\"snap\",\"v\":2,\"a\":["
+                       "{\"i\":\"w1:p1\",\"n\":\"a\",\"s\":\"idle\"}]}";
+    TEST_ASSERT_EQUAL(SHEPHERD_OK, shepherdParse(line, &f));
+    TEST_ASSERT_EQUAL(-1, f.firstDone());
+    TEST_ASSERT_EQUAL(-1, f.firstShowable());
+}
+
+void test_blocked_and_done_are_both_found_so_the_caller_can_rank_them(void) {
+    // The UI rings for blocked when both are present: someone waiting on you
+    // outranks something waiting for you. Both indices have to be reachable
+    // for that choice to exist at all.
+    const char* line =
+      "{\"t\":\"snap\",\"v\":2,\"a\":["
+      "{\"i\":\"w1:p1\",\"n\":\"a\",\"s\":\"done\"},"
+      "{\"i\":\"w2:p1\",\"n\":\"b\",\"s\":\"blocked\",\"q\":\"ok?\",\"r\":\"r2\"}]}";
+    TEST_ASSERT_EQUAL(SHEPHERD_OK, shepherdParse(line, &f));
+    TEST_ASSERT_EQUAL(0, f.firstDone());
+    TEST_ASSERT_EQUAL(1, f.firstShowable());
+}
+
 // -------------------------------------------------------- recap + elapsed
 
 void test_the_recap_and_its_timestamp_are_parsed(void) {
@@ -410,6 +453,9 @@ int main(int, char**) {
     RUN_TEST(test_only_a_blocked_agent_with_an_untruncated_question_is_answerable);
     RUN_TEST(test_first_answerable_walks_the_queue);
     RUN_TEST(test_showable_includes_the_ones_you_cannot_answer);
+    RUN_TEST(test_done_is_found_separately_from_blocked);
+    RUN_TEST(test_idle_is_not_done_and_must_never_ring);
+    RUN_TEST(test_blocked_and_done_are_both_found_so_the_caller_can_rank_them);
     RUN_TEST(test_the_recap_and_its_timestamp_are_parsed);
     RUN_TEST(test_an_agent_with_no_recap_leaves_the_field_empty);
     RUN_TEST(test_a_long_recap_is_truncated_not_overflowed);

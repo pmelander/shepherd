@@ -112,18 +112,25 @@ def _last_block(lines: list[str], marker: str, skip_tools: bool = False) -> str:
 
 
 def truncate_body(text: str, limit: int = BODY_MAX) -> str:
-    """Cut to `limit`, on a word boundary when one is near the end.
+    """Keep the END, drop the beginning.
 
-    Marked with ASCII "..." because the device's font has no ellipsis glyph.
+    The opposite of how truncation usually goes, and deliberately. An agent's
+    answer opens with what it did and closes with what it concluded and what
+    it needs next — "no PR opened, say the word", "tell me when to stop the
+    servers". On a screen that can only hold part of it, the part worth
+    carrying is the part you would have scrolled to.
+
+    Cut on a word boundary when one is close by, and marked with ASCII "..."
+    because the device's font has no ellipsis glyph.
     """
     collapsed = " ".join((text or "").split())
     if len(collapsed) <= limit:
         return collapsed
-    cut = collapsed[: limit - 3]
-    space = cut.rfind(" ")
-    if space > limit - 40:      # only if it does not cost most of a line
-        cut = cut[:space]
-    return cut.rstrip() + "..."
+    cut = collapsed[-(limit - 3):]
+    space = cut.find(" ")
+    if 0 <= space < 40:         # only if it does not cost most of a line
+        cut = cut[space + 1:]
+    return "..." + cut.lstrip()
 
 
 def extract_answer(pane_text: str | None) -> str:

@@ -36,19 +36,26 @@ void shepherdUiDraw(M5Canvas& spr, int W, int H);
 // Handle one key. Returns true when Shepherd consumed it.
 bool shepherdUiKey(HalKey k);
 
-// True while the device is showing a question the host will accept an answer
-// for.
-bool shepherdUiNeedsAttention();
-
-// True exactly once when a blocked agent needs a human, and again every
-// SHEPHERD_NAG_MS for as long as `unseen` stays true.
+// What, if anything, currently wants a human.
 //
-// Edge-triggered rather than level, because the caller wakes the screen and
-// makes a noise with it, and "an agent is still blocked" is true for minutes.
-// Pass screenOff as `unseen`: once the display is up, the reader has been
+// Two kinds, and they are not the same urgency. Blocked means an agent has
+// stopped and cannot continue without you. Done means one finished while you
+// were looking somewhere else — Herdr only reports `done` for a tab that has
+// not been seen, so a focused pane never produces it. Both deserve telling;
+// only one deserves an interruption.
+enum class ShepherdAlarm : uint8_t { None = 0, Done = 1, Blocked = 2 };
+
+ShepherdAlarm shepherdUiAttention();
+
+// The same thing, edge-triggered: returns non-None exactly once per new
+// arrival, and again every SHEPHERD_NAG_MS for as long as `unseen` holds.
+//
+// Edge rather than level because the caller wakes the screen and makes a
+// noise with it, and "an agent is still blocked" stays true for minutes.
+// Pass screenOff as `unseen`: once the display is up the reader has been
 // told, and a device that keeps chirping at someone already looking at it is
 // a device they will turn off.
-bool shepherdUiTakeAlarm(bool unseen);
+ShepherdAlarm shepherdUiTakeAlarm(bool unseen);
 
 // Lock the keys immediately, without waiting out the idle window. Called
 // when the screen goes dark.

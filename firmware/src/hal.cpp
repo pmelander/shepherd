@@ -62,6 +62,7 @@ int   halTempC()                      { return (int)M5.Axp.GetTempInAXP192(); }
 uint8_t halPowerBtnPress()            { return M5.Axp.GetBtnPress(); }
 
 void halBeepInit()                    { M5.Beep.begin(); }
+void halBeepVolume(uint8_t)           { /* passive buzzer: no volume */ }
 void halBeepUpdate()                  { M5.Beep.update(); _pumpSeq(); }
 void halBeep(uint16_t f, uint16_t d)  { M5.Beep.tone(f, d); }
 
@@ -109,7 +110,10 @@ void halInit() {
   auto cfg = M5.config();
   M5Cardputer.begin(cfg, true);   // true = also init the keyboard matrix
   M5.Speaker.begin();
-  M5.Speaker.setVolume(160);
+  // Halved from upstream's 160 at the user's request: a pocket device that
+  // makes noise unrequested. sfxPlay sets it per sound anyway; this is the
+  // level anything bypassing sfxPlay gets.
+  M5.Speaker.setVolume(80);
 }
 void halUpdate() {
   M5Cardputer.update();
@@ -140,6 +144,7 @@ void halLedSet(uint8_t r, uint8_t g, uint8_t b) {
 }
 
 void halBeepInit()                    { /* done in halInit() */ }
+void halBeepVolume(uint8_t v)         { M5.Speaker.setVolume(v); }
 void halBeepUpdate()                  { _pumpSeq(); }
 void halBeep(uint16_t f, uint16_t d)  { M5.Speaker.tone(f, d); }
 

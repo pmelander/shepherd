@@ -233,10 +233,15 @@ The core loop works end to end and has been exercised against real agents: an ag
 blocks, the device shows the question, a keypress from across the room answers it, and
 the file the agent wanted to write appears.
 
-**It does not yet get your attention.** `shepherdUiNeedsAttention()` exists, is correct,
-and is called by nothing — the board's speaker and its WS2812B are still driven only by
-upstream's own pet state, which Shepherd does not feed. So today the device shows you a
-blocked agent; it does not tell you about one. Until that is wired, this is a glance
-device rather than a notifier, which is half of what it is for.
+It also tells you, rather than waiting to be looked at: the screen sleeps after 15
+seconds and wakes itself, with a sound and a coloured pulse, when an agent blocks or
+finishes. Two tiers, because they are not the same urgency — amber and the 1-UP jingle
+for blocked, green and two soft notes for done — and only blocked repeats.
+
+One thing about `done` is worth knowing before you wonder why nothing fired: Herdr
+reports it only for a tab that has **not been seen**. A focused pane goes to `idle`
+instead, so the agent you are watching finish will never chirp at you. That is correct,
+and it is also why the alarm looked broken the first time it was tested on the pane in
+front of the tester.
 
 The rest of what is deliberately not done is in [`TODOS.md`](TODOS.md).

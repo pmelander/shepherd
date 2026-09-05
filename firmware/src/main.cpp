@@ -195,9 +195,25 @@ static const uint16_t SFX_WARN_F[]     = { 330 };                         // E4 
 static const uint16_t SFX_WARN_D[]     = { 140 };
 static const uint16_t SFX_WARN2_F[]    = { 220, 165 };                    // A3, E3 — heavier
 static const uint16_t SFX_WARN2_D[]    = {  90, 180 };
+// Shepherd's "one of them finished" chime. Deliberately not the 1-UP jingle:
+// done is information, blocked is an interruption, and the two must not
+// sound alike or the urgent one stops meaning anything. Two soft rising
+// notes, over in a fifth of a second.
+static const uint16_t SFX_DONE_F[]     = { 1047, 1568 };                  // C6, G6
+static const uint16_t SFX_DONE_D[]     = {   60,   90 };
+
+// Playback volume, 0-255. Half of upstream's 160: this is a device that
+// lives in a pocket and makes noise unrequested, and at full volume the
+// alarm is startling rather than informative.
+static const uint8_t SFX_VOLUME = 80;
 
 static void sfxPlay(const uint16_t* f, const uint16_t* d, uint8_t n) {
-  if (settings().sound) halBeepSeq(f, d, n);
+  if (!settings().sound) return;
+  // Set before queueing, not per note: the sequencer plays over the next few
+  // hundred ms, so a volume changed straight after would only affect the
+  // first note.
+  halBeepVolume(SFX_VOLUME);
+  halBeepSeq(f, d, n);
 }
 #define SFX_N(arr) (uint8_t)(sizeof(arr) / sizeof((arr)[0]))
 static void sfxNav()     { sfxPlay(SFX_NAV_F,     SFX_NAV_D,     SFX_N(SFX_NAV_F));     }
@@ -210,6 +226,11 @@ static void sfxAlert()   { sfxPlay(SFX_ALERT_F,   SFX_ALERT_D,   SFX_N(SFX_ALERT
 static void sfxMenu()    { sfxPlay(SFX_MENU_F,    SFX_MENU_D,    SFX_N(SFX_MENU_F));    }
 static void sfxWarn()    { sfxPlay(SFX_WARN_F,    SFX_WARN_D,    SFX_N(SFX_WARN_F));    }
 static void sfxWarn2()   { sfxPlay(SFX_WARN2_F,   SFX_WARN2_D,   SFX_N(SFX_WARN2_F));   }
+// Shepherd's two. Same volume, different tunes: telling them apart is the
+// tune's job, and making the urgent one louder would only make the other one
+// easy to sleep through.
+static void sfxHerdBlocked() { sfxPlay(SFX_ALERT_F, SFX_ALERT_D, SFX_N(SFX_ALERT_F)); }
+static void sfxHerdDone()    { sfxPlay(SFX_DONE_F,  SFX_DONE_D,  SFX_N(SFX_DONE_F));  }
 #undef SFX_N
 
 static void sendCmd(const char* json) {
@@ -1407,17 +1428,25 @@ void loop() {
   //
   // Edge-triggered inside shepherdUiTakeAlarm, and told whether the screen is
   // off so it knows whether anyone has been shown the news yet.
-  const bool shepAttention = shepherdUiActive() && shepherdUiNeedsAttention();
-  if (shepherdUiTakeAlarm(screenOff)) {
+  const ShepherdAlarm shepWants =
+      shepherdUiActive() ? shepherdUiAttention() : ShepherdAlarm::None;
+  const ShepherdAlarm ring =
+      shepherdUiActive() ? shepherdUiTakeAlarm(screenOff) : ShepherdAlarm::None;
+  if (ring != ShepherdAlarm::None) {
     wake();
-    if (settings().sound) sfxAlert();
+    if (ring == ShepherdAlarm::Blocked) sfxHerdBlocked();
+    else                                sfxHerdDone();
   }
 
   // LED: pulse on attention, otherwise off. halLedSet dispatches to the
   // StickC red GPIO or the Cardputer NeoPixel; both clear on (0,0,0).
-  if (shepAttention && settings().led) {
+  // Colour matches the herd list, so the light and the screen agree.
+  if (shepWants != ShepherdAlarm::None && settings().led) {
     bool on = (now / 400) % 2;
-    halLedSet(on ? 220 : 0, on ? 60 : 0, 0);   // amber, matching the screen
+    if (shepWants == ShepherdAlarm::Blocked)
+      halLedSet(on ? 220 : 0, on ? 60 : 0, 0);     // amber: someone is waiting
+    else
+      halLedSet(0, on ? 150 : 0, 0);               // green: finished, unseen
   } else if (activeState == P_ATTENTION && settings().led) {
     bool on = (now / 400) % 2;
     halLedSet(on ? 180 : 0, on ? 40 : 0, 0);   // red-orange pulse
