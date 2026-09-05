@@ -308,6 +308,13 @@ class Runner:
                 # iterate against.
                 continue
             result = await gate.dispatch(req)
+            if result.ok and result.body is not None:
+                # A read, not a change. Answer it and move on without
+                # touching the dirty flag: nothing about the herd moved.
+                await transport.send(self.builder.encode(
+                    self.builder.detail_frame(req.pane_id, result.body)))
+                log.debug("detail %s -> %d chars", req.pane_id, len(result.body))
+                continue
             log.info("action %s %s -> %s%s", req.action.value, req.pane_id,
                      "ok" if result.ok else "refused",
                      "" if result.ok else f" ({result.reason})")

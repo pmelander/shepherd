@@ -333,6 +333,17 @@ class FrameBuilder:
             frame["why"] = reason
         return frame
 
+    @staticmethod
+    def detail_frame(pane_id: str, body: str) -> dict:
+        """A reply to one detail request.
+
+        Sent on demand rather than folded into the snapshot, because a
+        900-character answer per agent would be a 10KB frame twelve times a
+        minute for text nobody is looking at. The device asks for exactly the
+        one it is about to draw.
+        """
+        return {"t": "deet", "v": PROTOCOL_VERSION, "i": pane_id, "b": body}
+
     def encode(self, frame: Mapping) -> bytes:
         return (json.dumps(frame, separators=(",", ":"), ensure_ascii=False)
                 + "\n").encode("utf-8")

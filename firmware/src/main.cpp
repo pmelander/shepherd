@@ -1570,8 +1570,8 @@ void loop() {
       // Enter also cycles the buddy's displayMode underneath the queue.
       // suppressPending() no-ops unless that button is genuinely held, so
       // calling it for a 'y' press is harmless.
-      if (k == HalKey::Approve || k == HalKey::Unlock) halBtnA().suppressPending();
-      if (k == HalKey::Back) halBtnB().suppressPending();
+      if (k == HalKey::Approve) halBtnA().suppressPending();
+      if (k == HalKey::Back || k == HalKey::Unlock) halBtnB().suppressPending();
       continue;
     }
 

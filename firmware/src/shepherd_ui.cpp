@@ -94,7 +94,11 @@ static ShepherdView g_view = ShepherdView::Auto;
 
 static int g_listSel = 0;         // highlighted row in the herd list
 static int g_listTop = 0;         // first visible row, for scrolling
-static uint32_t g_detailMs = 0;   // when the recap started spelling itself out
+static uint32_t g_detailMs = 0;   // when the body started spelling itself out
+static ShepherdDetail g_detail;   // the fetched answer, for one agent
+static bool g_detailPending = false;   // asked the relay, nothing back yet
+static int g_scroll = 0;          // first visible line of the body
+static bool g_typedOut = false;   // reveal finished, or skipped by scrolling
 
 // The pane the queue was showing last frame. Used to tell "the same prompt is
 // still there" from "a new one arrived", which is the only thing allowed to
@@ -145,6 +149,22 @@ bool shepherdUiApply(const char* line) {
   ShepherdFrame parsed;
   ShepherdParse r = shepherdParse(line, &parsed);
   if (r == SHEPHERD_NOT_MINE) return false;
+
+  if (r == SHEPHERD_DETAIL) {
+    // Deliberately does NOT touch g_lastFrameMs: a detail reply is something
+    // we asked for, so counting it as proof of life would let the staleness
+    // rule be satisfied by our own curiosity rather than by the relay still
+    // watching the herd.
+    ShepherdDetail d;
+    if (shepherdParseDetail(line, &d)) {
+      g_detail = d;
+      g_detailPending = false;
+      g_detailMs = millis();
+      g_scroll = 0;
+      g_typedOut = false;
+    }
+    return true;
+  }
 
   g_lastFrameMs = millis();
   g_everReceived = true;
@@ -303,12 +323,13 @@ static void drawBadVersion(M5Canvas& spr, int W, int H) {
 // that fixed layout. Wrapping the revealed prefix instead would be simpler
 // and much worse: words would jump between lines as the typewriter caught up
 // with them, and the reader would be chasing the text.
-static void drawTyped(M5Canvas& spr, const char* text, int x, int y,
-                      int cols, int maxLines, int lineH, int reveal) {
+static int drawTyped(M5Canvas& spr, const char* text, int x, int y,
+                     int cols, int maxLines, int lineH, int reveal,
+                     int skipLines = 0) {
   int len = (int)strlen(text);
   int pos = 0, line = 0, drawn = 0;
   char buf[96];
-  while (pos < len && line < maxLines) {
+  while (pos < len) {
     int take = len - pos;
     if (take > cols) {
       take = cols;
@@ -321,22 +342,28 @@ static void drawTyped(M5Canvas& spr, const char* text, int x, int y,
     if (take >= (int)sizeof(buf)) take = (int)sizeof(buf) - 1;
 
     int show = reveal - drawn;
-    if (show <= 0) break;
     if (show > take) show = take;
-    memcpy(buf, text + pos, show);
-    buf[show] = 0;
-    spr.drawString(buf, x, y + line * lineH);
+    const int row = line - skipLines;
+    if (show > 0 && row >= 0 && row < maxLines) {
+      memcpy(buf, text + pos, show);
+      buf[show] = 0;
+      spr.drawString(buf, x, y + row * lineH);
 
-    // A caret at the write head, while there is still text to come. It is
-    // what makes the reveal read as typing rather than as a slow redraw.
-    if (drawn + show < len)
-      spr.drawString("_", x + show * 6, y + line * lineH);
+      // A caret at the write head, while there is still text to come. It is
+      // what makes the reveal read as typing rather than as a slow redraw.
+      if (drawn + show < len)
+        spr.drawString("_", x + show * 6, y + row * lineH);
+    }
 
     drawn += take;                 // advance by the whole line, not the part
     pos += take;                   // shown, so the layout stays put
     while (pos < len && text[pos] == ' ') { pos++; drawn++; }
     line++;
+    // Keep counting lines past the window so the caller knows how far it can
+    // scroll, but stop once the reveal has run out - there is nothing below.
+    if (show <= 0 && reveal <= drawn) break;
   }
+  return line;
 }
 
 // Nothing needs answering: a scrollable list of the herd, with a cursor.
@@ -418,19 +445,39 @@ static void drawDetail(M5Canvas& spr, int W, int H, int idx) {
   spr.setTextDatum(TL_DATUM);
   spr.drawFastHLine(0, 30, W, 0x2104);
 
-  if (a.recap[0]) {
-    int reveal = (int)((millis() - g_detailMs) / SH_TYPE_MS);
-    spr.setTextColor(C_TEXT, C_BG);
-    drawTyped(spr, a.recap, 6, 36, 38, 6, 11, reveal);
-  } else {
+  const bool mine = strcmp(g_detail.pane, a.pane) == 0;
+  const int rows = 6;
+  int total = 0;
+
+  if (g_detailPending || !mine) {
+    // The relay has been asked and has not answered yet. Say so rather than
+    // showing the previous agent's text under this agent's name.
     spr.setTextColor(C_DIM, C_BG);
-    spr.drawString("no recap - this agent has", 6, 36);
-    spr.drawString("not said what it is doing", 6, 47);
+    spr.drawString("asking...", 6, 36);
+  } else if (g_detail.body[0]) {
+    int reveal = g_typedOut ? SHEPHERD_BODY_LEN
+                            : (int)((millis() - g_detailMs) / SH_TYPE_MS);
+    spr.setTextColor(C_TEXT, C_BG);
+    total = drawTyped(spr, g_detail.body, 6, 36, 38, rows, 11, reveal, g_scroll);
+  } else {
+    // An empty body is an answer, not a failure: mid-tool-call, or nothing
+    // said yet. Inventing a summary here would be the dishonest option.
+    spr.setTextColor(C_DIM, C_BG);
+    spr.drawString("nothing said yet", 6, 36);
   }
 
   spr.drawFastHLine(0, H - 14, W, C_DIM);
   spr.setTextColor(C_DIM, C_BG);
-  spr.drawString("[del] back   [;/.] next agent", 6, H - 11);
+  if (total > rows) {
+    char pos[16];
+    snprintf(pos, sizeof(pos), "%d/%d", g_scroll + 1, total - rows + 1);
+    spr.setTextDatum(TR_DATUM);
+    spr.drawString(pos, W - 6, H - 11);
+    spr.setTextDatum(TL_DATUM);
+    spr.drawString("[;/.] scroll  [</>] agent", 6, H - 11);
+  } else {
+    spr.drawString("[del] back  [</>] next agent", 6, H - 11);
+  }
 }
 
 // Something needs answering: the queue screen.
@@ -465,7 +512,7 @@ static void drawQueue(M5Canvas& spr, int W, int H, int idx) {
   if (g_lock.locked(millis())) {
     // Advertise the way out rather than the keys that will not work.
     spr.setTextColor(C_LOCK, C_BG);
-    spr.drawString("locked - Fn+Enter to unlock", 6, H - 11);
+    spr.drawString("locked - Fn+Del to unlock", 6, H - 11);
   } else if (!canApprove) {
     spr.drawString("[n] deny  [>] next  [del] list", 6, H - 11);
   } else {
@@ -550,6 +597,18 @@ static bool showingList() {
   return g_view == ShepherdView::Auto && g_frame.firstShowable() < 0;
 }
 
+// Ask the relay what this agent last said. Signed exactly like an approve:
+// it makes the relay read a pane, and "an unauthenticated peer cannot make
+// the relay do work" covers reads too.
+static void requestDetail(const ShepherdAgent& a, uint32_t now) {
+  g_detail.clear();
+  g_detailPending = true;
+  g_detailMs = now;
+  g_scroll = 0;
+  g_typedOut = false;
+  sendAct(a, "detail");
+}
+
 bool shepherdUiKey(HalKey k) {
   if (!shepherdUiActive()) return false;
 
@@ -563,13 +622,18 @@ bool shepherdUiKey(HalKey k) {
     note(g_lock.toggle(now) ? "locked" : "unlocked");
     return true;
   }
+  // Every key, not only the two that send. Navigating the herd in a pocket
+  // is harmless in itself, but it moves the selection - so you would unlock
+  // to answer and find the cursor somewhere other than where you left it,
+  // with the queue's y bound to whichever agent the cloth landed on.
+  if (!g_lock.accept(now)) {
+    // Consumed, not passed on: while Shepherd owns the screen a locked key
+    // must not reach the buddy's approve path either. And it says so,
+    // because a silent no-op is indistinguishable from a broken device.
+    note("locked - Fn+Del");
+    return true;
+  }
   if (g_badVersion || stale()) return false;
-
-  // Every key you press keeps an unlocked device awake. The lock itself is
-  // enforced at the two places that actually send something, not here -
-  // reading the herd in a pocket harms nothing, and a device you must unlock
-  // before you may even look at it is a worse glance device for no gain.
-  g_lock.touch(now);
 
   // ---- the detail screen -------------------------------------------------
   if (g_view == ShepherdView::Detail) {
@@ -577,14 +641,24 @@ bool shepherdUiKey(HalKey k) {
       case HalKey::Back:
         g_view = ShepherdView::List;
         return true;
+
       case HalKey::Up:
-      case HalKey::Left:
       case HalKey::Down:
+        // Scrolling is also the impatient exit from the typewriter: once you
+        // have started moving through the text, watching it appear a
+        // character at a time is in your way.
+        g_typedOut = true;
+        if (k == HalKey::Down) g_scroll++;
+        else if (g_scroll > 0) g_scroll--;
+        return true;
+
+      case HalKey::Left:
       case HalKey::Right:
         // Walk the herd without surfacing to the list between agents.
-        moveSelection((k == HalKey::Down || k == HalKey::Right) ? 1 : -1);
-        g_detailMs = now;   // each agent spells itself out afresh
+        moveSelection(k == HalKey::Right ? 1 : -1);
+        if (g_listSel < g_frame.count) requestDetail(g_frame.agents[g_listSel], now);
         return true;
+
       default:
         // Nothing on this screen sends anything, so swallow the rest rather
         // than letting y/n fall through to a queue the reader cannot see.
@@ -606,7 +680,7 @@ bool shepherdUiKey(HalKey k) {
       case HalKey::Approve:
         if (g_frame.count == 0) return true;
         g_view = ShepherdView::Detail;
-        g_detailMs = now;
+        requestDetail(g_frame.agents[g_listSel], now);
         return true;
       case HalKey::Back:
         // Back out of a list you navigated to deliberately; on the automatic
@@ -632,7 +706,6 @@ bool shepherdUiKey(HalKey k) {
         note("cannot approve - laptop");
         return true;
       }
-      if (!g_lock.accept(now)) { note("locked - Fn+Enter"); return true; }
       sendAct(g_frame.agents[idx], "approve");
       note("approved");
       g_cursor = idx + 1;
@@ -641,10 +714,8 @@ bool shepherdUiKey(HalKey k) {
     case HalKey::Deny:
       // Deny stays available even when approve is not: escaping a prompt you
       // cannot fully read is always safe, and it is the whole point of being
-      // able to answer from the sofa. It is still an action, so it is still
-      // behind the lock.
+      // able to answer from the sofa.
       if (idx < 0) return false;
-      if (!g_lock.accept(now)) { note("locked - Fn+Enter"); return true; }
       sendAct(g_frame.agents[idx], "deny");
       note("denied");
       g_cursor = idx + 1;

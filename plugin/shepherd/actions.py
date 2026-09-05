@@ -48,12 +48,18 @@ from .auth import verify as verify_mac
 from .herdr import HerdrError, HerdrSource
 from .models import is_pane_id
 from .prompt import PromptError, parse_prompt, plan_approve, plan_deny
+from .recap import extract_answer
 
 
 class Action(enum.Enum):
     APPROVE = "approve"
     DENY = "deny"
     FOCUS = "focus"
+    # Read-only: fetch what the agent last said, for the device to display.
+    # It goes through this gate rather than around it because it still reads
+    # a pane, and the rule that an unauthenticated peer cannot make the relay
+    # do work applies to reads as much as to writes.
+    DETAIL = "detail"
 
 
 # The closed set, as a literal map. Membership here is the only way to reach
@@ -62,6 +68,7 @@ ACTIONS: Mapping[str, Action] = {
     "approve": Action.APPROVE,
     "deny": Action.DENY,
     "focus": Action.FOCUS,
+    "detail": Action.DETAIL,
 }
 
 
@@ -103,6 +110,10 @@ class ActionResult:
     # True when the device should be told to refresh, because what it is
     # showing no longer matches reality.
     restale: bool = False
+    # Set only by DETAIL: the text to send back. Empty string is a real
+    # answer meaning "this agent has not said anything readable", which the
+    # device renders as such; None means this was not a detail request.
+    body: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -231,6 +242,17 @@ class ActionGate:
 
         if req.pane_id not in self._allowed:
             return self._refuse(req, Refusal.UNKNOWN_PANE)
+
+        if req.action is Action.DETAIL:
+            # Reads nothing but the pane the device is already showing, and
+            # sends no keys. Not audited as an action for that reason: the
+            # log is a record of things that changed the world, and burying
+            # real approvals under a scroll of reads would make it useless.
+            try:
+                text = await self.source.read_pane(req.pane_id, lines=80)
+            except HerdrError as e:
+                return self._refuse(req, Refusal.HERDR_FAILED, detail=str(e))
+            return ActionResult(ok=True, request=req, body=extract_answer(text))
 
         if req.action is Action.FOCUS:
             return await self._run(req, "focus", ())

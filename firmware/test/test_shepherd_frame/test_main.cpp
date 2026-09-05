@@ -242,6 +242,55 @@ void test_elapsed_is_formatted_at_the_coarsest_useful_unit(void) {
     shepherdFormatElapsed(b, sizeof(b), -1);       TEST_ASSERT_EQUAL_STRING("", b);
 }
 
+// ------------------------------------------------------------- detail
+
+void test_a_detail_reply_is_recognised_but_not_parsed_as_a_snapshot(void) {
+    // shepherdParse hands it back as SHEPHERD_DETAIL rather than filling a
+    // frame, because the body is a kilobyte and does not belong on every
+    // snapshot's stack.
+    const char* line = "{\"t\":\"deet\",\"v\":2,\"i\":\"w9:p1\",\"b\":\"Done.\"}";
+    TEST_ASSERT_EQUAL(SHEPHERD_DETAIL, shepherdParse(line, &f));
+
+    ShepherdDetail d;
+    TEST_ASSERT_TRUE(shepherdParseDetail(line, &d));
+    TEST_ASSERT_EQUAL_STRING("w9:p1", d.pane);
+    TEST_ASSERT_EQUAL_STRING("Done.", d.body);
+}
+
+void test_an_empty_body_is_an_answer_not_a_failure(void) {
+    // "this agent has not said anything readable" is a real reply. Rejecting
+    // it would leave the screen saying "asking..." forever.
+    const char* line = "{\"t\":\"deet\",\"v\":2,\"i\":\"w9:p1\",\"b\":\"\"}";
+    ShepherdDetail d;
+    TEST_ASSERT_TRUE(shepherdParseDetail(line, &d));
+    TEST_ASSERT_EQUAL_STRING("w9:p1", d.pane);
+    TEST_ASSERT_EQUAL_STRING("", d.body);
+}
+
+void test_a_detail_reply_needs_a_pane_and_a_matching_version(void) {
+    ShepherdDetail d;
+    TEST_ASSERT_FALSE(shepherdParseDetail(
+        "{\"t\":\"deet\",\"v\":2,\"b\":\"orphan\"}", &d));
+    TEST_ASSERT_FALSE(shepherdParseDetail(
+        "{\"t\":\"deet\",\"v\":99,\"i\":\"w9:p1\",\"b\":\"x\"}", &d));
+    TEST_ASSERT_FALSE(shepherdParseDetail(
+        "{\"t\":\"snap\",\"v\":2,\"a\":[]}", &d));
+    TEST_ASSERT_FALSE(shepherdParseDetail("not json", &d));
+    TEST_ASSERT_FALSE(shepherdParseDetail(nullptr, &d));
+}
+
+void test_a_long_body_is_truncated_not_overflowed(void) {
+    char line[2048];
+    char b[1400];
+    memset(b, 'w', sizeof(b) - 1);
+    b[sizeof(b) - 1] = 0;
+    snprintf(line, sizeof(line),
+             "{\"t\":\"deet\",\"v\":2,\"i\":\"w9:p1\",\"b\":\"%s\"}", b);
+    ShepherdDetail d;
+    TEST_ASSERT_TRUE(shepherdParseDetail(line, &d));
+    TEST_ASSERT_EQUAL(SHEPHERD_BODY_LEN - 1, (int)strlen(d.body));
+}
+
 // ------------------------------------------------------------ long text
 
 void test_a_long_question_is_truncated_not_overflowed(void) {
@@ -367,6 +416,10 @@ int main(int, char**) {
     RUN_TEST(test_iso_seconds_parses_the_hosts_exact_shape_and_nothing_else);
     RUN_TEST(test_a_clock_that_disagrees_reads_as_zero_not_as_negative);
     RUN_TEST(test_elapsed_is_formatted_at_the_coarsest_useful_unit);
+    RUN_TEST(test_a_detail_reply_is_recognised_but_not_parsed_as_a_snapshot);
+    RUN_TEST(test_an_empty_body_is_an_answer_not_a_failure);
+    RUN_TEST(test_a_detail_reply_needs_a_pane_and_a_matching_version);
+    RUN_TEST(test_a_long_body_is_truncated_not_overflowed);
     RUN_TEST(test_a_long_question_is_truncated_not_overflowed);
     RUN_TEST(test_builds_an_act_frame);
     RUN_TEST(test_act_frame_without_a_decision_id);

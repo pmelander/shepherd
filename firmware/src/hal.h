@@ -139,6 +139,6 @@ enum class HalKey : uint8_t {
   Back,          // Esc (backtick) / Del / Backspace — close modal
   Menu,          // m
   Demo,          // g
-  Unlock,        // Fn+Enter — toggles Shepherd's key lock
+  Unlock,        // Fn+Del — toggles Shepherd's key lock
 };
 HalKey halPollKey();

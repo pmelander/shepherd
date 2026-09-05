@@ -8,9 +8,10 @@
 // that need no board.
 //
 // Host -> device:
-//   {"t":"snap","v":1,"ts":"...","a":[
+//   {"t":"snap","v":2,"ts":"...","a":[
 //      {"i":"w9:p1","n":"elasmigr","s":"blocked","e":"...",
-//       "q":"Allow Bash(...)?","r":"a1b2c3d4e5f6","x":true}],
+//       "q":"Allow Bash(...)?","r":"a1b2c3d4e5f6","x":true,
+//       "d":"what this agent says it is doing"}],
 //    "more":2,"why":"herdr unreachable"}
 //
 //   `e` is absent when the host cannot honestly claim to know how long the
@@ -20,6 +21,13 @@
 //
 // Device -> host:
 //   {"t":"act","i":"w9:p1","k":"approve","r":"a1b2c3d4e5f6"}
+//
+// Host -> device, in reply to k:"detail":
+//   {"t":"deet","v":2,"i":"w9:p1","b":"Done. Task #175078 ..."}
+//
+//   Fetched on demand rather than carried in every snapshot: 900 characters
+//   per agent would be a 10KB frame twelve times a minute for text nobody is
+//   looking at.
 
 #include <ArduinoJson.h>
 #include <stdio.h>
@@ -31,9 +39,11 @@
 // v2 added `d`, the per-agent recap shown on the detail screen.
 #define SHEPHERD_PROTOCOL_VERSION 2
 
-// The host caps a frame at 12 agents (its MAX_AGENTS) for the sake of this
-// device's 2048-byte receive ring. Matching it here means an over-long frame
-// is truncated rather than overflowing.
+// The host caps a frame at 12 agents (its MAX_AGENTS). The binding limit is
+// data.h's line-reassembly buffer, not the BLE ring: it holds one JSON line
+// and drops the overflow silently, so a frame that does not fit presents as
+// a screen going stale rather than as an error. Matching the cap here means
+// an over-long frame is counted and truncated rather than overflowing.
 #define SHEPHERD_MAX_AGENTS 12
 
 #define SHEPHERD_PANE_LEN 16
@@ -47,6 +57,9 @@
 // RECAP_MAX in frame.py is 64 characters; the host cuts with ASCII "..." so
 // this is 64 bytes, not 64 codepoints. Rounded up for headroom.
 #define SHEPHERD_RECAP_LEN 72
+// One detail body. BODY_MAX in recap.py is 900; the device holds exactly one
+// at a time, for the agent whose screen is up.
+#define SHEPHERD_BODY_LEN 1024
 
 struct ShepherdAgent {
   char pane[SHEPHERD_PANE_LEN];
@@ -80,6 +93,15 @@ enum ShepherdParse {
   SHEPHERD_OK = 1,
   SHEPHERD_BAD_VERSION = 2,
   SHEPHERD_MALFORMED = 3,
+  SHEPHERD_DETAIL = 4,     // a `deet` reply, parsed into ShepherdDetail
+};
+
+// One agent's last answer, as fetched on demand.
+struct ShepherdDetail {
+  char pane[SHEPHERD_PANE_LEN];
+  char body[SHEPHERD_BODY_LEN];
+
+  void clear() { pane[0] = 0; body[0] = 0; }
 };
 
 struct ShepherdFrame {
@@ -149,7 +171,9 @@ inline ShepherdParse shepherdParse(const char* line, ShepherdFrame* out) {
   if (deserializeJson(doc, line)) return SHEPHERD_NOT_MINE;
 
   const char* t = doc["t"] | (const char*)nullptr;
-  if (!t || strcmp(t, "snap") != 0) return SHEPHERD_NOT_MINE;
+  if (!t) return SHEPHERD_NOT_MINE;
+  if (strcmp(t, "deet") == 0) return SHEPHERD_DETAIL;   // caller re-parses
+  if (strcmp(t, "snap") != 0) return SHEPHERD_NOT_MINE;
 
   out->clear();
   _shCopy(out->ts, sizeof(out->ts), doc["ts"] | (const char*)nullptr);
@@ -192,6 +216,26 @@ inline ShepherdParse shepherdParse(const char* line, ShepherdFrame* out) {
     out->degraded = true;
   }
   return SHEPHERD_OK;
+}
+
+// Parse a `deet` reply. Separate from shepherdParse because it fills a
+// different, much larger struct that only the detail screen owns — folding
+// it into ShepherdFrame would put a kilobyte on every snapshot's stack.
+inline bool shepherdParseDetail(const char* line, ShepherdDetail* out) {
+  if (!line || !out) return false;
+  JsonDocument doc;
+  if (deserializeJson(doc, line)) return false;
+  const char* t = doc["t"] | (const char*)nullptr;
+  if (!t || strcmp(t, "deet") != 0) return false;
+  if ((doc["v"] | 0) != SHEPHERD_PROTOCOL_VERSION) return false;
+  const char* pane = doc["i"] | (const char*)nullptr;
+  if (!pane || !*pane) return false;
+  out->clear();
+  _shCopy(out->pane, sizeof(out->pane), pane);
+  // An empty body is a real answer: "this agent has not said anything
+  // readable". The screen says so rather than showing a blank.
+  _shCopy(out->body, sizeof(out->body), doc["b"] | "");
+  return true;
 }
 
 // ------------------------------------------------------------- elapsed

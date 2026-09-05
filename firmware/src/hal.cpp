@@ -250,15 +250,14 @@ struct KeyBtn : HalBtn {
 };
 
 struct EnterBtn : KeyBtn {
-  // Fn+Enter belongs to Shepherd's key lock and must be invisible here.
-  // Without this the chord presses BtnA in parallel with emitting
-  // HalKey::Unlock, so unlocking also cycles the buddy's displayMode - and
-  // holding it the extra 600ms opens the buddy menu, which draws over
-  // Shepherd's queue.
+  // An Fn chord must be invisible to the button layer. Without this, a
+  // chord presses BtnA in parallel with emitting its HalKey, so the buddy's
+  // displayMode cycles underneath - and holding it the extra 600ms opens the
+  // buddy menu, which draws over Shepherd.
   //
   // Latched for the whole hold rather than tested per poll: releasing Fn
-  // while Enter is still down would otherwise look like a fresh rise and
-  // fire the buddy anyway. Cleared when Enter itself comes up.
+  // while the key is still down would otherwise look like a fresh rise and
+  // fire the buddy anyway. Cleared when the key itself comes up.
   bool _chord = false;
   bool isDown() override {
     auto st = M5Cardputer.Keyboard.keysState();
@@ -268,13 +267,18 @@ struct EnterBtn : KeyBtn {
   }
 };
 struct EscBtn : KeyBtn {
+  // Same latch as EnterBtn, for the same reason: Fn+Del is Shepherd's lock
+  // chord and must not also press BtnB.
+  bool _chord = false;
   bool isDown() override {
     // Cardputer has no physical Esc, so deny = backtick (`) which sits
     // where Esc would be, plus the dedicated `del` key. Either works.
     auto st = M5Cardputer.Keyboard.keysState();
-    if (st.del) return true;
-    for (auto c : st.word) if (c == '`') return true;
-    return false;
+    bool down = st.del;
+    if (!down) for (auto c : st.word) if (c == '`') { down = true; break; }
+    if (!down) { _chord = false; return false; }
+    if (st.fn) _chord = true;
+    return !_chord;
   }
 };
 
@@ -314,11 +318,15 @@ bool _wordContains(const std::vector<char>& v, char c) {
 void _pollKeyEvents() {
   auto& st = M5Cardputer.Keyboard.keysState();
   // Fn is the lock chord's modifier. Holding it suppresses every ordinary
-  // key event, so Fn+Enter is an input shape one point of pressure cannot
+  // key event, so Fn+key is an input shape one point of pressure cannot
   // make — which is the whole reason Shepherd's key lock uses it rather than
   // a key sequence, since cloth can eventually type any sequence.
+  //
+  // Del rather than Enter: Enter now opens an agent's detail from the herd
+  // list, and a modifier away from "show me this" is too close to "lock the
+  // device" for a key you reach for without looking.
   if (st.fn) {
-    if (st.enter && !_prevEnter) _pushKey(HalKey::Unlock);
+    if (st.del && !_prevDel) _pushKey(HalKey::Unlock);
     _prevEnter = st.enter;
     _prevDel   = st.del;
     _prevWord  = st.word;
