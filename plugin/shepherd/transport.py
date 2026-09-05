@@ -162,7 +162,6 @@ class BleTransport:
         self._client = None
         self._queue: asyncio.Queue[str] = asyncio.Queue()
         self._assembler = LineAssembler()
-        self._mtu: int | None = None
 
     # -- discovery ------------------------------------------------------
 
@@ -230,7 +229,13 @@ class BleTransport:
 
         self._client = client
         self._address = address
-        self._mtu = getattr(client, "mtu_size", None)
+        # Deliberately NOT cached here. Observed live: bleak reported
+        # mtu_size == 23 immediately after connect while the device logged
+        # "mtu=517" a second later. MTU negotiation completes after the
+        # connection does, so a value read at connect time can be the
+        # pre-negotiation default. Caching it chunked every frame to 20 bytes
+        # when 514 were available — a silent 25x throughput loss on a battery
+        # device. Read it at send time instead.
 
     def _on_notify(self, _sender, data: bytearray) -> None:
         for line in self._assembler.feed(bytes(data)):
@@ -242,7 +247,15 @@ class BleTransport:
 
     @property
     def mtu(self) -> int | None:
-        return self._mtu
+        """The live negotiated MTU, read fresh every time.
+
+        Never memoised: negotiation finishes after the connection does, and
+        the value differs per connection (23 and 517 both observed against
+        the same device on the same adapter).
+        """
+        if self._client is None:
+            return None
+        return getattr(self._client, "mtu_size", None)
 
     # -- traffic --------------------------------------------------------
 
@@ -256,7 +269,7 @@ class BleTransport:
         """
         if not self.connected or self._client is None:
             raise TransportError("not connected")
-        for part in split_frame(payload, chunk_size(self._mtu)):
+        for part in split_frame(payload, chunk_size(self.mtu)):
             try:
                 await self._client.write_gatt_char(NUS_RX, part, response=True)
             except Exception as e:  # noqa: BLE001
@@ -301,7 +314,15 @@ class FakeTransport:
 
     @property
     def mtu(self) -> int | None:
-        return self._mtu
+        """The live negotiated MTU, read fresh every time.
+
+        Never memoised: negotiation finishes after the connection does, and
+        the value differs per connection (23 and 517 both observed against
+        the same device on the same adapter).
+        """
+        if self._client is None:
+            return None
+        return getattr(self._client, "mtu_size", None)
 
     async def send(self, payload: bytes) -> None:
         if self.closed:

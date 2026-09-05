@@ -208,3 +208,40 @@ def test_a_built_frame_round_trips_through_chunking_and_reassembly():
     assert frame["t"] == "snap"
     assert frame["a"][0]["i"] == "w9:p1"
     assert "…" in frame["a"][0]["q"]
+
+
+# --------------------------------------------------------------- live MTU
+
+
+class _FakeClient:
+    """Stands in for bleak's client. mtu_size changes after connect, as the
+    real one does."""
+
+    def __init__(self, mtu):
+        self.mtu_size = mtu
+        self.is_connected = True
+
+
+def test_mtu_is_read_live_not_cached_at_connect():
+    # Observed on hardware: bleak reported mtu_size == 23 immediately after
+    # connect while the device logged mtu=517 a second later. Caching the
+    # connect-time value chunked every frame to 20 bytes when 514 were
+    # available - a silent 25x throughput loss on a battery device.
+    from shepherd.transport import BleTransport
+
+    t = BleTransport(address="AA:BB:CC:DD:EE:FF")
+    t._client = _FakeClient(23)
+    assert t.mtu == 23
+    assert chunk_size(t.mtu) == 20
+
+    t._client.mtu_size = 517          # negotiation completes
+    assert t.mtu == 517, "MTU must be re-read, not memoised"
+    assert chunk_size(t.mtu) == 514
+
+
+def test_mtu_is_none_when_disconnected():
+    from shepherd.transport import BleTransport
+
+    t = BleTransport(address="AA:BB:CC:DD:EE:FF")
+    assert t.mtu is None
+    assert chunk_size(t.mtu) == MIN_MTU - ATT_OVERHEAD

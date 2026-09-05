@@ -1296,6 +1296,22 @@ void drawHUD() {
 }
 
 void setup() {
+  // Serial works, and this is what proved it. Arduino Serial output never
+  // appeared for most of a session while ESP-IDF logs did, which left three
+  // BLE hypotheses untestable and got all three of them wrong. The cause was
+  // never Serial: ARDUINO_USB_CDC_ON_BOOT was simply unset, so it went to
+  // UART0 which is not wired to USB on this board.
+  //
+  // Kept behind a flag because firmware work is coming and being unable to
+  // see inside the device is the single most expensive thing that happened
+  // today. Turn it off when the UI work is done.
+#if SHEPHERD_SERIAL_PROBE
+  Serial.begin(115200);
+  delay(300);
+  Serial.println("[shepherd] SERIAL-MARKER setup entry");
+  Serial.flush();
+#endif
+
   halInit();
   M5.Lcd.setRotation(HOME_ROTATION);
   halImuInit();
@@ -1349,6 +1365,19 @@ void loop() {
   halBeepUpdate();
   t++;
   uint32_t now = millis();
+
+  // Heartbeat. Cheap, and it is what caught the MTU bug: the host library
+  // reported 23 at connect while this line showed the device negotiating 517
+  // a second later.
+#if SHEPHERD_SERIAL_PROBE
+  static uint32_t _probeNext = 0;
+  if ((int32_t)(now - _probeNext) >= 0) {
+    _probeNext = now + 2000;
+    Serial.printf("[shepherd] SERIAL-HEARTBEAT %lus ble=%d\n",
+                  (unsigned long)(now / 1000), (int)bleConnected());
+    Serial.flush();
+  }
+#endif
 
   dataPoll(&tama);
   if (statsPollLevelUp()) triggerOneShot(P_CELEBRATE, 3000);
