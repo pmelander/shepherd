@@ -4,6 +4,7 @@
 #include "ble_bridge.h"
 #include "data.h"
 #include "buddy.h"
+#include "shepherd_ui.h"
 
 TFT_eSprite spr = TFT_eSprite(&M5.Lcd);
 
@@ -1233,6 +1234,10 @@ void drawPet() {
 }
 
 void drawHUD() {
+  // Shepherd owns the screen once it has ever had a frame. Standing aside
+  // when the link goes quiet would hand the display back to the buddy, which
+  // would cheerfully draw an idle pet while the herd's real state is unknown.
+  if (shepherdUiActive()) { shepherdUiDraw(spr, W, H); return; }
   if (tama.promptId[0]) { drawApproval(); return; }
   const Palette& p = characterPalette();
   const int SHOW = 3, LH = 8, WIDTH = 21;
@@ -1553,6 +1558,12 @@ void loop() {
     // above) and HalKey::Approve (this loop). If we trusted the outer
     // snapshot, a single Enter would approve twice in one frame.
     bool promptLive = tama.promptId[0] && !responseSent;
+
+    // Shepherd takes keys before anything else while it owns the screen, so
+    // y/n answer the queued prompt rather than upstream's aggregate one.
+    // It returns false for keys it does not use, which fall through to the
+    // buddy's own handling below.
+    if (shepherdUiKey(k)) continue;
 
     // Pending approval overrides everything else — Y/N answer directly.
     if (promptLive) {

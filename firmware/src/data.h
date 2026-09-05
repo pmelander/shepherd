@@ -67,7 +67,18 @@ inline const char* dataScenarioName() {
 static bool _rtcValid = false;
 inline bool dataRtcValid() { return _rtcValid; }
 
+// Forward-declared rather than included: shepherd_ui.h pulls in M5GFX and
+// hal.h, and this header has no business knowing about either.
+bool shepherdUiApply(const char* line);
+
 static void _applyJson(const char* line, TamaState* out) {
+  // Shepherd frames get first refusal. They are a different protocol on the
+  // same link — per-agent, where upstream's is aggregate — so letting
+  // upstream parse them would populate the buddy's session counts with
+  // nonsense. shepherdUiApply returns false for anything that is not ours,
+  // and upstream carries on untouched.
+  if (shepherdUiApply(line)) { _lastLiveMs = millis(); return; }
+
   JsonDocument doc;
   if (deserializeJson(doc, line)) return;
   if (xferCommand(doc)) { _lastLiveMs = millis(); return; }
