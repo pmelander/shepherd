@@ -72,6 +72,30 @@ class ServerCallbacks : public BLEServerCallbacks {
   }
 };
 
+// ------------------------------------------------------------ bonding
+//
+// One device, one bond. The link is Just Works, so pairing itself proves
+// nothing about who is on the other end — but a bond is still the thing that
+// gets a peer an encrypted channel and a place in the stack's key store, and
+// there is no reason for a second one to exist. Shepherd talks to exactly one
+// laptop.
+//
+// This is defence in depth, not the defence. A stranger who bonded would
+// still be stopped by the app-layer HMAC, the pane allowlist and the relay's
+// send-time re-verification. It closes the outermost door rather than the
+// last one.
+//
+// Deliberately NOT done with an advertising whitelist, which is the obvious
+// Bluedroid answer: esp_ble_bond_dev_t carries the address but not its type,
+// and whitelisting with the wrong type locks out the host that is already
+// paired. Refusing the bond leaves reconnection untouched — a returning peer
+// uses its stored LTK and never runs pairing at all — so the failure mode of
+// getting this wrong is "a stranger can bond", not "the owner cannot".
+int bleBondCount() {
+  int n = esp_ble_get_bond_device_num();
+  return n < 0 ? 0 : n;
+}
+
 // Pairing mode is a build-time choice. See SHEPHERD_BLE_PASSKEY below.
 //
 // Upstream default (SHEPHERD_BLE_PASSKEY defined): LE Secure Connections
@@ -101,6 +125,15 @@ class SecCallbacks : public BLESecurityCallbacks {
     (void)pin;
     return false;
 #else
+    // One bond, and only one. A returning peer never reaches this callback —
+    // it reconnects with its stored LTK and skips pairing entirely — so
+    // refusing here costs the owner nothing and costs a stranger the bond.
+    if (bleBondCount() > 0) {
+      Serial.printf("[ble] confirm %06lu -> REFUSED, already bonded "
+                    "(forget pairing in settings to re-pair)\n",
+                    (unsigned long)pin);
+      return false;
+    }
     Serial.printf("[ble] confirm %06lu -> accept (just works)\n",
                   (unsigned long)pin);
     return true;
@@ -202,14 +235,19 @@ bool bleSecure()    { return secure; }
 uint32_t blePasskey() { return passkey; }
 
 void bleClearBonds() {
-  int n = esp_ble_get_bond_device_num();
-  if (n <= 0) return;
+  int n = bleBondCount();
+  if (n <= 0) { Serial.println("[ble] no bonds to clear"); return; }
   esp_ble_bond_dev_t* list = (esp_ble_bond_dev_t*)malloc(n * sizeof(esp_ble_bond_dev_t));
   if (!list) return;
   esp_ble_get_bond_device_list(&n, list);
   for (int i = 0; i < n; i++) esp_ble_remove_bond_device(list[i].bd_addr);
   free(list);
-  Serial.printf("[ble] cleared %d bond(s)\n", n);
+  Serial.printf("[ble] cleared %d bond(s); pairing is open again\n", n);
+  // Drop whoever is on the link. Removing the key from the store does not
+  // tear down a session already running on it, and leaving the old peer
+  // connected while advertising as unpaired is the most confusing possible
+  // half-state to hand back to someone who just asked to start over.
+  if (server && connected) server->disconnect(server->getConnId());
 }
 
 size_t bleAvailable() {

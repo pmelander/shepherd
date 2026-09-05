@@ -30,3 +30,15 @@ void bleClearBonds();
 size_t bleAvailable();
 int bleRead();
 size_t bleWrite(const uint8_t* data, size_t len);
+
+// ------------------------------------------------------------ bonding
+//
+// How many centrals this device has bonded with. Shepherd bonds with exactly
+// one — the laptop running the relay — and refuses to make a second.
+int  bleBondCount();
+
+// bleClearBonds() above is the escape hatch for that refusal, and it has to
+// exist: a bond is two halves, and Windows can drop its half without telling
+// anyone. Remove the device in Windows Settings and re-add it, and without a
+// way to forget on this side the device would refuse the new pairing forever,
+// with no way back short of a reflash.

@@ -226,6 +226,13 @@ it on the wrong one.
   bits for a link that sometimes negotiates a 20-byte payload. The bond proves the peer is
   a device Windows once paired with; it does not prove it is *this* Cardputer, because
   Just Works gives no MITM protection and `bleak` cannot run a passkey ceremony.
+- **One bond, and only one.** Once the device has paired with a laptop it refuses to
+  pair with anything else — a second central's attempt fails at the bond. Outermost
+  door rather than the last one: a stranger who *did* bond would still meet the HMAC,
+  the allowlist and the re-verification. The already-paired host is unaffected, because
+  reconnection uses the stored key and never runs pairing. **settings → reset → forget
+  pairing** reopens it, which has to exist: Windows can drop its half of a bond without
+  telling anyone.
 - **Signatures bind to a frame we actually sent**, which is the only replay protection
   `focus` has, since it carries no decision id. Decision ids are one-shot.
 - **Verification happens before anything is read.** An unauthenticated peer should not be

@@ -2,22 +2,54 @@
 
 ## Firmware
 
-### Refuse further BLE bonds after the first, and give the HMAC key a rotation path
+### ~~Refuse further BLE bonds after the first~~ — DONE. Key rotation still open.
 
-**What:** After one successful pairing, the peripheral should stop accepting new bonds. And the shared HMAC secret should be changeable without a full USB reflash.
+**Bonds: done.** `onConfirmPIN` refuses when `bleBondCount() > 0`, so the device
+bonds with exactly one central. Verified live: `bonds=1 (pairing closed)` at boot,
+and the already-bonded laptop still reconnects — `[ble] connected / auth ok /
+mtu=517` — because a returning peer uses its stored LTK and never runs pairing.
 
-**Why:** Just Works bonding with bonding left open means any central can pair with the device. The app-layer HMAC is what actually blocks a stranger's frames — but it is baked into the firmware at build time in plaintext build flags, and with OTA cut, rotating it means the BtnG0+BtnRST dance and a reflash. The one real credential in the system is unrotatable in practice.
+Deliberately not an advertising whitelist, which is the obvious Bluedroid answer:
+`esp_ble_bond_dev_t` carries the address but not its type, and whitelisting with the
+wrong type locks out the host that is *already* paired. Refusing the bond leaves
+reconnection untouched, so getting it wrong fails toward "a stranger can bond"
+rather than "the owner cannot".
 
-**Context:** `bleak` on Windows forces `NO_INPUT_OUTPUT` / MITM-off pairing — verified in `bleak/backends/winrt/client.py` line 524, which hardcodes `ceremony = DevicePairingKinds.CONFIRM_ONLY`. So pairing itself cannot be hardened and the app-layer MAC is the entire defence. The key is generated at relay first run and flashed at build time; that bootstrap ordering is not yet sequenced anywhere. Damage is already bounded by the send-time re-verification decided in this review (a hostile peer can only approve a prompt genuinely on screen, and only when it was shown untruncated), which is why this is defence in depth rather than an open door. Start with NimBLE's bond-count configuration; for rotation, reading the key from the SD card at boot is the cheap option but trades firmware exposure for physical-media exposure.
+Escape hatch: **settings → reset → forget pairing**, tap-twice confirm, bonds only
+— separate from factory reset because re-pairing after Windows drops its half
+should not also cost you the pet, the stats and the settings. Without it a
+one-sided bond loss would be unrecoverable short of a reflash. The info screen
+gains a `paired` line, since a refusal is invisible from the outside.
+
+Not verified: an actual second central being turned away. No second BLE host was
+available. The guard is armed and the non-regression is proven; the refusal path
+itself has only been read, not run.
+
+**Key rotation: still open.** The HMAC secret is still a build-time flag in
+plaintext, so rotating it means the BtnG0+BtnRST dance and a reflash. The one real
+credential in the system remains unrotatable in practice.
+
+The idea worth trying first is a signed re-key over the link itself: the relay
+sends a new secret in a frame signed with the *current* one, the device verifies,
+stores it in NVS and acks, and the relay only writes the new secret to its config
+once the ack lands. Rotation then requires possession of the current key, which is
+exactly the right property, and it needs no SD card and no reflash. The new key
+does cross the link — acceptable under LE Secure Connections, whose ECDH defeats a
+*passive* eavesdropper even in Just Works mode; the residual risk is an active MITM
+present at rotation time, who would have had to MITM the original pairing too.
 
 **Effort:** M
 **Priority:** P3
-**Depends on:** BLE pairing-policy probe passing; the firmware fork building
 
 ### ~~Key lock / screen-off state for pocket carry~~ — DONE
 
 Built as `src/shepherd_lock.h` plus a `HalKey::Unlock` chord. Locked at boot,
-re-locked after 30s of no keys, unlocked by **Fn+Enter**.
+re-locked after 30s of no keys (and immediately when the screen sleeps),
+unlocked by **Fn+Del**.
+
+Del rather than Enter, which now opens an agent's recap from the herd list: a
+modifier away from "show me this" is too close to "lock the device" for a key you
+reach for without looking.
 
 Fn is the chord because the keyboard scanner already suppresses every
 ordinary key event while Fn is held, which makes Fn+key the one input shape a

@@ -24,6 +24,12 @@ static void startBt() {
   esp_read_mac(mac, ESP_MAC_BT);
   snprintf(btName, sizeof(btName), "Shepherd-%02X%02X", mac[4], mac[5]);
   bleInit(btName);
+  // State the bonding posture once at boot. "Shepherd is not connecting" is
+  // a question that gets asked at the radio layer first, and knowing whether
+  // this device will even entertain a new pairing is the cheapest possible
+  // first answer.
+  Serial.printf("[ble] %s, bonds=%d (%s)\n", btName, bleBondCount(),
+                bleBondCount() > 0 ? "pairing closed" : "pairing open");
 }
 
 #include "character.h"
@@ -273,8 +279,13 @@ uint8_t resetSel  = 0;
 // item in the main menu; while open, Left/Right step species and the HUD
 // is suppressed so the pet has the canvas.
 bool    petPickerOpen = false;
-const char* resetItems[] = { "delete char", "factory reset", "back" };
-const uint8_t RESET_N = 3;
+// "forget pairing" sits beside factory reset because it is destructive and
+// this submenu already has the tap-twice confirm. It is separate from
+// factory reset because the two are wanted at completely different moments:
+// re-pairing after Windows drops its half of the bond should not also cost
+// you your pet, your stats and your settings.
+const char* resetItems[] = { "delete char", "forget pairing", "factory reset", "back" };
+const uint8_t RESET_N = 4;
 static uint32_t resetConfirmUntil = 0;
 static uint8_t  resetConfirmIdx = 0xFF;
 
@@ -310,7 +321,7 @@ static void applyReset(uint8_t idx) {
   uint32_t now = millis();
   bool armed = (resetConfirmIdx == idx) && (int32_t)(now - resetConfirmUntil) < 0;
 
-  if (idx == 2) { resetOpen = false; return; }
+  if (idx == 3) { resetOpen = false; return; }
 
   if (!armed) {
     resetConfirmIdx = idx;
@@ -345,6 +356,13 @@ static void applyReset(uint8_t idx) {
       }
       d.close();
     }
+  } else if (idx == 1) {
+    // forget pairing: bonds only. Does not restart - the device stays up,
+    // advertising, and ready for a fresh pairing from Windows Settings.
+    bleClearBonds();
+    resetOpen = false;
+    resetConfirmIdx = 0xFF;
+    return;
   } else {
     // factory reset: NVS namespace wipe + filesystem format + BLE bonds.
     // Clears stats, owner, petname, species, settings, GIF characters,
@@ -827,6 +845,10 @@ void drawInfo() {
     spr.setTextColor(p.textDim, p.bg);
     ln("  via       %s", dataScenarioName());
     ln("  ble       %s", !bleConnected() ? "-" : bleSecure() ? "encrypted" : "OPEN");
+    // Whether a second central could still bond. The refusal is invisible
+    // from the outside - a stranger just sees pairing fail - so this is the
+    // only place you can confirm the door is actually shut.
+    ln("  paired    %s", bleBondCount() > 0 ? "yes, closed" : "no, OPEN");
     uint32_t age = (millis() - tama.lastUpdated) / 1000;
     ln("  last msg  %lus", (unsigned long)age);
     ln("  state     %s", stateNames[activeState]);
