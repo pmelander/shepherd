@@ -27,7 +27,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import os
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Awaitable, Callable, Mapping
 
 from .actions import ActionGate, PendingDecision, fingerprint, parse_action
@@ -38,6 +40,47 @@ from .models import AgentStatus, HerdSnapshot
 from .transport import BleTransport, Transport, TransportError, backoff_delays
 
 log = logging.getLogger("shepherd")
+
+
+def herdr_liveness() -> str | None:
+    """Herdr's own liveness stamp, or None when it is gone.
+
+    HERDR_SOCKET_PATH names a file whose contents are `pid:start_time_nanos`.
+    Herdr deletes it when a session stops and writes a new one on the next
+    start, so this single string answers both "is Herdr still there" and "is
+    it the same Herdr".
+    """
+    raw = os.environ.get("HERDR_SOCKET_PATH")
+    if not raw:
+        return None
+    try:
+        return Path(raw).read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+
+
+async def watch_herdr(runner: "Runner", interval: float = 5.0,
+                      sleep: Callable[[float], Awaitable[None]] = asyncio.sleep) -> None:
+    """Stop the relay when its Herdr session ends or is replaced.
+
+    Herdr does NOT kill plugin startup processes when a session stops —
+    verified by stopping a test session and finding the relay still running
+    afterwards. Without this, every Herdr restart would leave another orphan
+    competing for the same Cardputer, and the newest one would lose.
+    """
+    initial = herdr_liveness()
+    if initial is None:
+        log.debug("no HERDR_SOCKET_PATH; running unsupervised")
+        return
+    while not runner._stop:
+        await sleep(interval)
+        current = herdr_liveness()
+        if current != initial:
+            log.info("herdr session ended or restarted (%s -> %s); exiting",
+                     initial, current)
+            runner.stop()
+            return
+
 
 # Membership discovery. Slow on purpose: this is the only thing that spawns a
 # process, and at 1Hz it would be ~86,000 subprocess launches per working day

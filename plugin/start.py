@@ -32,7 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from shepherd.frame import FrameBuilder
 from shepherd.herdr import CliHerdrSource, herdr_binary
-from shepherd.runner import Runner
+from shepherd.runner import Runner, watch_herdr
 from shepherd.transport import BleTransport
 
 HERE = Path(__file__).resolve().parent
@@ -113,10 +113,19 @@ async def serve() -> int:
         with contextlib.suppress(NotImplementedError, AttributeError):
             loop.add_signal_handler(sig, runner.stop)
 
+    # Herdr does not kill plugin startup processes when its session stops —
+    # verified by stopping a test session and finding this relay still
+    # running afterwards. Without the watchdog every Herdr restart would
+    # leave another orphan competing for the same Cardputer.
+    watchdog = asyncio.create_task(watch_herdr(runner))
     try:
         await runner.run()
     except asyncio.CancelledError:
         pass
+    finally:
+        watchdog.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await watchdog
     logging.info("shepherd stopped")
     return 0
 

@@ -275,3 +275,80 @@ def test_action_loop_marks_dirty_on_a_refusal_that_needs_a_refresh():
     run(r._action_loop(t, gate))
     assert src.sent == [], "a changed prompt must not be answered"
     assert r._dirty
+
+
+# --------------------------------------------------------------- watchdog
+
+
+def test_liveness_is_none_without_the_env_var(monkeypatch):
+    from shepherd.runner import herdr_liveness
+    monkeypatch.delenv("HERDR_SOCKET_PATH", raising=False)
+    assert herdr_liveness() is None
+
+
+def test_liveness_reads_the_stamp(monkeypatch, tmp_path):
+    from shepherd.runner import herdr_liveness
+    sock = tmp_path / "herdr.sock"
+    sock.write_text("1256:1788328813559367200", encoding="utf-8")
+    monkeypatch.setenv("HERDR_SOCKET_PATH", str(sock))
+    assert herdr_liveness() == "1256:1788328813559367200"
+
+
+def test_liveness_is_none_when_the_file_is_gone(monkeypatch, tmp_path):
+    from shepherd.runner import herdr_liveness
+    monkeypatch.setenv("HERDR_SOCKET_PATH", str(tmp_path / "absent.sock"))
+    assert herdr_liveness() is None
+
+
+def test_watchdog_stops_the_relay_when_herdr_goes_away(monkeypatch, tmp_path):
+    # Herdr does NOT kill plugin startup processes when a session stops -
+    # found by stopping a test session and seeing the relay survive. Without
+    # this, each Herdr restart leaves another orphan fighting for the device.
+    from shepherd.runner import watch_herdr
+
+    sock = tmp_path / "herdr.sock"
+    sock.write_text("1256:111", encoding="utf-8")
+    monkeypatch.setenv("HERDR_SOCKET_PATH", str(sock))
+
+    src = FakeSource()
+    r, _, _ = make(src)
+    ticks = {"n": 0}
+
+    async def sleep(_d):
+        ticks["n"] += 1
+        if ticks["n"] == 2:
+            sock.unlink()          # session stopped
+        await asyncio.sleep(0)
+
+    run(watch_herdr(r, interval=0.01, sleep=sleep))
+    assert r._stop, "relay must exit when its Herdr session ends"
+
+
+def test_watchdog_stops_the_relay_when_herdr_restarts(monkeypatch, tmp_path):
+    # A different pid:starttime means a new Herdr, whose own startup hook will
+    # launch a fresh relay. This one should get out of its way.
+    from shepherd.runner import watch_herdr
+
+    sock = tmp_path / "herdr.sock"
+    sock.write_text("1256:111", encoding="utf-8")
+    monkeypatch.setenv("HERDR_SOCKET_PATH", str(sock))
+
+    r, _, _ = make(FakeSource())
+    ticks = {"n": 0}
+
+    async def sleep(_d):
+        ticks["n"] += 1
+        if ticks["n"] == 2:
+            sock.write_text("9999:222", encoding="utf-8")
+        await asyncio.sleep(0)
+
+    run(watch_herdr(r, interval=0.01, sleep=sleep))
+    assert r._stop
+
+
+def test_watchdog_is_a_noop_without_supervision(monkeypatch):
+    from shepherd.runner import watch_herdr
+    monkeypatch.delenv("HERDR_SOCKET_PATH", raising=False)
+    r, _, _ = make(FakeSource())
+    run(watch_herdr(r, interval=0.01))
+    assert not r._stop, "running outside Herdr must not self-terminate"
