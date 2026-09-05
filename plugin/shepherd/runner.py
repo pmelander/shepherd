@@ -38,6 +38,7 @@ from .events import EventStreamError, PipeEventSource
 from .frame import FrameBuilder
 from .herdr import CliHerdrSource, HerdrSource
 from .models import AgentStatus, HerdSnapshot
+from .prompt import parse_prompt
 from .transport import BleTransport, Transport, TransportError, backoff_delays
 
 log = logging.getLogger("shepherd")
@@ -172,14 +173,33 @@ class Runner:
     # -- frames -------------------------------------------------------------
 
     def build(self) -> tuple[dict, dict[str, PendingDecision]]:
-        prompts = self._prompt_texts()
-        frame = self.builder.build(self._snapshot, prompts)
+        raw = self._prompt_texts()
+
+        # The frame carries the PARSED question, never the raw pane buffer.
+        # Sending the buffer put the Claude Code splash banner in `q`, flagged
+        # every prompt as truncated, and so made every blocked agent
+        # unanswerable — the device drew the herd list and the approve key did
+        # nothing, with no explanation on screen.
+        #
+        # It would also have churned the decision id on every poll, because
+        # the buffer contains a live token counter: the id is hashed from this
+        # text, so a stable question has to mean stable bytes.
+        display: dict[str, str] = {}
+        for pane_id, text in raw.items():
+            parsed = parse_prompt(text)
+            if parsed and parsed.question:
+                display[pane_id] = parsed.question
+
+        frame = self.builder.build(self._snapshot, display)
         pending: dict[str, PendingDecision] = {}
         for row in frame.get("a", []):
             decision = row.get("r")
             if not decision:
                 continue
-            full = prompts.get(row["i"])
+            # Fingerprints stay keyed on the raw buffer: the gate re-reads the
+            # pane at send time and fingerprints that, so both sides must be
+            # comparing the same kind of thing.
+            full = raw.get(row["i"])
             if full is None:
                 continue
             pending[decision] = PendingDecision(

@@ -153,7 +153,9 @@ bool shepherdUiActive() {
 
 bool shepherdUiNeedsAttention() {
   if (stale() || g_badVersion) return false;
-  return g_frame.firstAnswerable() >= 0;
+  // Showable, not answerable: an agent whose question was truncated still
+  // stopped and still wants you. "You must open the laptop" is attention too.
+  return g_frame.firstShowable() >= 0;
 }
 
 // ---------------------------------------------------------------- output
@@ -284,15 +286,19 @@ static void drawQueue(M5Canvas& spr, int W, int H, int idx) {
   spr.setTextColor(C_TEXT, C_BG);
   int y = drawWrapped(spr, a.question, 6, 34, 38, 5, 11);
 
-  if (a.truncated) {
-    // The host will refuse this approve, so the device must not offer it.
+  // Say why approve is off whenever it is off, not only for the truncated
+  // case. An unexplained dead key reads as a broken device.
+  const bool canApprove = a.answerable();
+  if (!canApprove) {
     spr.setTextColor(C_STALE, C_BG);
-    spr.drawString("truncated - open the laptop", 6, y + 2);
+    spr.drawString(a.truncated ? "truncated - open the laptop"
+                               : "no decision id - open the laptop",
+                   6, y + 2);
   }
 
   spr.drawFastHLine(0, H - 14, W, C_DIM);
   spr.setTextColor(C_DIM, C_BG);
-  if (a.truncated) {
+  if (!canApprove) {
     spr.drawString("[n] deny   [>] next", 6, H - 11);
   } else {
     spr.drawString("[y] approve  [n] deny  [>] next", 6, H - 11);
@@ -308,8 +314,12 @@ void shepherdUiDraw(M5Canvas& spr, int W, int H) {
   } else if (stale()) {
     drawStale(spr, W, H);
   } else {
-    int idx = g_frame.firstAnswerable(g_cursor);
-    if (idx < 0) idx = g_frame.firstAnswerable();
+    // Showable, not answerable. Driving the screen off answerability sent a
+    // blocked-but-truncated agent to the herd list, where it read as one more
+    // amber row and the approve key did nothing with no explanation — which
+    // made the queue screen's own "open the laptop" line unreachable code.
+    int idx = g_frame.firstShowable(g_cursor);
+    if (idx < 0) idx = g_frame.firstShowable();
     if (idx >= 0) drawQueue(spr, W, H, idx);
     else drawHerd(spr, W, H);
   }
@@ -355,21 +365,28 @@ bool shepherdUiKey(HalKey k) {
   if (!shepherdUiActive()) return false;
   if (g_badVersion || stale()) return false;
 
-  int idx = g_frame.firstAnswerable(g_cursor);
-  if (idx < 0) idx = g_frame.firstAnswerable();
+  // Keys follow the screen: whatever drawQueue is showing is what y/n act on.
+  int idx = g_frame.firstShowable(g_cursor);
+  if (idx < 0) idx = g_frame.firstShowable();
 
   switch (k) {
     case HalKey::Approve:
       if (idx < 0) return false;
       // Belt and braces with the host: it refuses truncated approves too,
       // but the device should not offer an action it knows will be refused.
-      if (g_frame.agents[idx].truncated) { note("truncated - laptop"); return true; }
+      if (!g_frame.agents[idx].answerable()) {
+        note("cannot approve - laptop");
+        return true;
+      }
       sendAct(g_frame.agents[idx], "approve");
       note("approved");
       g_cursor = idx + 1;
       return true;
 
     case HalKey::Deny:
+      // Deny stays available even when approve is not: escaping a prompt you
+      // cannot fully read is always safe, and it is the whole point of being
+      // able to answer from the sofa.
       if (idx < 0) return false;
       sendAct(g_frame.agents[idx], "deny");
       note("denied");
@@ -378,7 +395,7 @@ bool shepherdUiKey(HalKey k) {
 
     case HalKey::Right:
     case HalKey::Down: {
-      int next = g_frame.firstAnswerable(idx + 1);
+      int next = g_frame.firstShowable(idx + 1);
       g_cursor = (next >= 0) ? next : 0;
       return true;
     }

@@ -107,6 +107,19 @@ struct ShepherdFrame {
       if (agents[i].answerable()) return i;
     return -1;
   }
+
+  // First agent worth putting on the queue screen, answerable or not.
+  //
+  // Distinct from firstAnswerable on purpose. A blocked agent whose question
+  // was truncated cannot be approved, but it still deserves the screen and an
+  // explanation — driving the queue off answerability alone sent those to the
+  // herd list instead, where they read as "blocked" with no reason and the
+  // approve key silently did nothing.
+  int firstShowable(int from = 0) const {
+    for (int i = from; i < count; i++)
+      if (agents[i].isBlocked() && agents[i].hasQuestion) return i;
+    return -1;
+  }
 };
 
 // Copy a JSON string field into a fixed buffer, always NUL-terminated.

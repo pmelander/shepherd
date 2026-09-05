@@ -192,6 +192,66 @@ def test_build_has_no_pending_when_nothing_is_blocked():
     assert pending == {}
 
 
+# A real Claude Code pane, not a fixture: splash banner above, live token
+# counter below, the question somewhere in the middle. Everything that broke
+# "Y does nothing" is in the parts that are NOT the question.
+def _real_pane(tokens: int) -> str:
+    return f"""\
+ ▐▛███▛█ Claude Code v2.1.261
+ ▝▜██████▀ Opus 5 (1M context)
+
+ cwd: C:\\scratch\\signtest
+
+> Create a file called signed.txt containing the word ok.
+
+ Write(signed.txt)
+ ⎿  Writing 1 line
+
+ Do you want to create signed.txt?
+ ❯ 1. Yes
+   2. Yes, and don't ask again this session
+   3. No, and tell Claude what to do differently (esc)
+
+ esc to interrupt · {tokens} tokens · 12.4s
+"""
+
+
+def test_the_frame_carries_the_parsed_question_not_the_pane_buffer():
+    # This is the bug the device found: build() sent the whole detection
+    # buffer as `q`, so the banner filled the screen, the length flagged the
+    # prompt as truncated, and every blocked agent came out unanswerable —
+    # the approve key did nothing, silently, on a genuinely blocked agent.
+    src = FakeSource([HerdSnapshot(agents=(agent("w9:p1", AgentStatus.BLOCKED, 5),))],
+                     pane_text=_real_pane(41_233))
+    r, _, _ = make(src)
+    run(r.refresh())
+    frame, _ = r.build()
+    row = frame["a"][0]
+
+    assert row["q"] == "Do you want to create signed.txt?"
+    assert "Claude Code" not in row["q"], "the splash banner is not the question"
+    assert "tokens" not in row["q"], "the status line is not the question"
+    assert not row.get("x"), "a short question must not arrive marked truncated"
+    assert row["r"], "answerable rows need a decision id"
+
+
+def test_the_decision_id_does_not_churn_while_the_token_counter_ticks():
+    # The id is hashed from the question text, and the gate only honours ids
+    # it has sent. Hashing the raw buffer would have minted a new id every
+    # poll: the one on screen would go stale between reading it and pressing
+    # a key, and every approve would be refused as unknown.
+    src = FakeSource([HerdSnapshot(agents=(agent("w9:p1", AgentStatus.BLOCKED, 5),))],
+                     pane_text=_real_pane(41_233))
+    r, _, _ = make(src)
+    run(r.refresh())
+    first = r.build()[0]["a"][0]["r"]
+
+    src.pane_text = _real_pane(58_907)
+    r._prompts.clear()          # force a re-read, as a seq change would
+    run(r._fetch_prompts())
+    assert r.build()[0]["a"][0]["r"] == first
+
+
 # ------------------------------------------------------------- push loop
 
 

@@ -105,8 +105,14 @@ def test_a_corrupt_secret_file_fails_loudly(tmp_path):
 
 
 def test_canonical_message_shape():
-    assert canonical_message(TS, "w9:p1", "approve", "abc123") == \
-        f"{TS}|w9:p1|approve|abc123".encode("utf-8")
+    # Written as a literal, not an f-string, and deliberately identical to the
+    # one asserted in firmware/test/test_shepherd_frame/test_main.cpp. The two
+    # implementations drifting is the realistic failure and it would be silent
+    # — every real action refused as a bad signature — so the agreement is
+    # made greppable across both suites rather than left to inspection.
+    assert canonical_message("2026-09-05T12:30:00Z", "w9:p1", "approve",
+                             "abc123") == \
+        b"2026-09-05T12:30:00Z|w9:p1|approve|abc123"
 
 
 def test_absent_decision_id_is_an_empty_field_not_a_missing_one():

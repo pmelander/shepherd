@@ -141,6 +141,28 @@ void test_first_answerable_walks_the_queue(void) {
     TEST_ASSERT_EQUAL(-1, f.firstAnswerable(2));
 }
 
+void test_showable_includes_the_ones_you_cannot_answer(void) {
+    // The queue screen is driven by firstShowable, not firstAnswerable. A
+    // blocked agent whose question was truncated cannot be approved, but it
+    // must still get the screen and the explanation — driving the UI off
+    // answerability alone hid it in the herd list, where the approve key did
+    // nothing and said nothing.
+    const char* line =
+      "{\"t\":\"snap\",\"v\":1,\"a\":["
+      "{\"i\":\"w1:p1\",\"n\":\"a\",\"s\":\"working\"},"
+      "{\"i\":\"w2:p1\",\"n\":\"b\",\"s\":\"blocked\"},"
+      "{\"i\":\"w3:p1\",\"n\":\"c\",\"s\":\"blocked\",\"q\":\"?\",\"r\":\"r3\",\"x\":true},"
+      "{\"i\":\"w4:p1\",\"n\":\"d\",\"s\":\"blocked\",\"q\":\"ok?\",\"r\":\"r4\"}]}";
+    TEST_ASSERT_EQUAL(SHEPHERD_OK, shepherdParse(line, &f));
+    TEST_ASSERT_EQUAL(3, f.firstAnswerable());
+    TEST_ASSERT_EQUAL(2, f.firstShowable());     // the truncated one, first
+    TEST_ASSERT_EQUAL(3, f.firstShowable(3));
+    TEST_ASSERT_EQUAL(-1, f.firstShowable(4));
+    // Blocked with no question at all is not worth a screen: there is nothing
+    // to show and nothing to press, so index 1 is skipped over.
+    TEST_ASSERT_EQUAL(2, f.firstShowable(1));
+}
+
 // ------------------------------------------------------------ long text
 
 void test_a_long_question_is_truncated_not_overflowed(void) {
@@ -259,6 +281,7 @@ int main(int, char**) {
     RUN_TEST(test_degraded_frame_carries_a_reason);
     RUN_TEST(test_only_a_blocked_agent_with_an_untruncated_question_is_answerable);
     RUN_TEST(test_first_answerable_walks_the_queue);
+    RUN_TEST(test_showable_includes_the_ones_you_cannot_answer);
     RUN_TEST(test_a_long_question_is_truncated_not_overflowed);
     RUN_TEST(test_builds_an_act_frame);
     RUN_TEST(test_act_frame_without_a_decision_id);
