@@ -7,21 +7,21 @@
 
 TFT_eSprite spr = TFT_eSprite(&M5.Lcd);
 
-// Advertise as "Bellwether-XXXX" (last two BT MAC bytes) so multiple
+// Advertise as "Shepherd-XXXX" (last two BT MAC bytes) so multiple
 // devices in one room are distinguishable. Name persists in btName for the
 // BLUETOOTH info page.
 //
 // Renamed from upstream's "Claude-XXXX": this device's counterpart is the
-// bellwether Herdr plugin, not the Claude desktop app, and sharing the
+// shepherd Herdr plugin, not the Claude desktop app, and sharing the
 // upstream prefix invites the desktop app's hardware picker to claim it.
-// Buffer widened from 16 because "Bellwether-XXXX" is exactly 16 with the
-// NUL and left no slack. The name rides in the scan response (see
-// setScanResponse(true) in ble_bridge.cpp), which has room for it.
-static char btName[24] = "Bellwether";
+// Buffer is 24 rather than upstream's 16, which had no slack for a longer
+// name. The name rides in the scan response (see setScanResponse(true) in
+// ble_bridge.cpp), which has room for it.
+static char btName[24] = "Shepherd";
 static void startBt() {
   uint8_t mac[6] = {0};
   esp_read_mac(mac, ESP_MAC_BT);
-  snprintf(btName, sizeof(btName), "Bellwether-%02X%02X", mac[4], mac[5]);
+  snprintf(btName, sizeof(btName), "Shepherd-%02X%02X", mac[4], mac[5]);
   bleInit(btName);
 }
 

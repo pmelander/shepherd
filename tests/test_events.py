@@ -18,7 +18,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugin"))
 
-from bellwether.events import (  # noqa: E402
+from shepherd.events import (  # noqa: E402
     EVENT_AGENT_STATUS_CHANGED,
     Ack,
     Failure,
@@ -28,7 +28,7 @@ from bellwether.events import (  # noqa: E402
     parse_line,
     socket_path,
 )
-from bellwether.models import AgentStatus  # noqa: E402
+from shepherd.models import AgentStatus  # noqa: E402
 
 
 # ------------------------------------------------------- request building

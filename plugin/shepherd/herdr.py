@@ -85,7 +85,7 @@ async def subprocess_runner(argv: Sequence[str], timeout: float) -> CommandResul
 
 
 class HerdrSource(Protocol):
-    """What Bellwether needs from Herdr. Nothing more."""
+    """What Shepherd needs from Herdr. Nothing more."""
 
     async def list_agents(self) -> HerdSnapshot: ...
 

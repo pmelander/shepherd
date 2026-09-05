@@ -17,9 +17,9 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugin"))
 
-from bellwether.frame import FrameBuilder  # noqa: E402
-from bellwether.models import Agent, AgentStatus, HerdSnapshot  # noqa: E402
-from bellwether.transport import (  # noqa: E402
+from shepherd.frame import FrameBuilder  # noqa: E402
+from shepherd.models import Agent, AgentStatus, HerdSnapshot  # noqa: E402
+from shepherd.transport import (  # noqa: E402
     ATT_OVERHEAD,
     MIN_MTU,
     NUS_RX,

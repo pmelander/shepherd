@@ -1,4 +1,4 @@
-"""Bellwether — per-agent Herdr state on a Cardputer ADV over BLE.
+"""Shepherd — per-agent Herdr state on a Cardputer ADV over BLE.
 
 Layout mirrors the seams the design review insisted on, so every layer is
 testable without Herdr running and without the device attached:

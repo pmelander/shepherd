@@ -1,6 +1,6 @@
 # Secrets — the relay generates its HMAC secret at first run.
 # This must never be committed; the firmware bakes it in at build time.
-bellwether.secret
+shepherd.secret
 *.secret
 secrets/
 .env
@@ -28,7 +28,7 @@ firmware/.pio/
 *.map
 
 # Local audit log — contains full prompt text from work repos
-bellwether-audit.log
+shepherd-audit.log
 *.audit.log
 
 # Editors / OS

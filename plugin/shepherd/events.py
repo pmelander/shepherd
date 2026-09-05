@@ -97,7 +97,7 @@ def socket_path() -> str:
 def build_subscribe_request(
     pane_ids: Sequence[str],
     statuses: Iterable[AgentStatus] | None = None,
-    request_id: str = "bellwether-events",
+    request_id: str = "shepherd-events",
 ) -> dict:
     """Build an events.subscribe request for a set of panes.
 

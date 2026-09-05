@@ -1,4 +1,4 @@
-# Bellwether — a BLE pocket herd radio for Herdr.
+# Shepherd — a BLE pocket herd radio for Herdr.
 #
 # This manifest currently declares the probe-3 skeleton: it exists to answer
 # "does a hook-spawned process inherit HERDR_ENV and the caller context vars?"
@@ -12,15 +12,15 @@
 # windows-only for now — the command array is not portable, and claiming
 # platforms we have not run on would be a lie the manifest tells.
 
-id = "bellwether"
-name = "Bellwether"
+id = "shepherd"
+name = "Shepherd"
 version = "0.0.1"
 min_herdr_version = "0.8.0"
 description = "Per-agent Herdr state on a Cardputer ADV over BLE. Glance, chirp, approve."
 platforms = ["windows"]
 
 # Fires when the Herdr session starts. Herdr owns the lifecycle and restarts,
-# and failures land in `herdr plugin log list --plugin bellwether`.
+# and failures land in `herdr plugin log list --plugin shepherd`.
 [[startup]]
 command = ["py", "-3", "start.py", "--mode", "startup"]
 
@@ -28,6 +28,6 @@ command = ["py", "-3", "start.py", "--mode", "startup"]
 # without waiting for a server restart, and later becomes the relay restart.
 [[actions]]
 id = "probe-env"
-title = "Bellwether: capture plugin environment"
+title = "Shepherd: capture plugin environment"
 contexts = ["global"]
 command = ["py", "-3", "start.py", "--mode", "action"]

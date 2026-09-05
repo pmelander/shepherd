@@ -19,13 +19,13 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugin"))
 
-from bellwether.herdr import (  # noqa: E402
+from shepherd.herdr import (  # noqa: E402
     CliHerdrSource,
     CommandResult,
     HerdrError,
     herdr_binary,
 )
-from bellwether.models import Agent, AgentStatus, is_pane_id  # noqa: E402
+from shepherd.models import Agent, AgentStatus, is_pane_id  # noqa: E402
 
 
 def run(coro):

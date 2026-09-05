@@ -1,4 +1,4 @@
-"""Bellwether plugin entrypoint.
+"""Shepherd plugin entrypoint.
 
 Right now this is the probe-3 instrument: it records what environment Herdr
 hands a plugin-spawned process, so the relay can be written against facts

@@ -9,7 +9,7 @@ firmware in `firmware/src/ble_bridge.cpp`, not guessed:
 
 Both characteristics are encrypted-only, so nothing flows until the link is
 bonded. The firmware pairs Just Works with NO_INPUT_OUTPUT because bleak's
-WinRT backend hardcodes CONFIRM_ONLY; see the BELLWETHER_BLE_PASSKEY block
+WinRT backend hardcodes CONFIRM_ONLY; see the SHEPHERD_BLE_PASSKEY block
 in ble_bridge.cpp for the whole story.
 
 Two firmware facts shape the code below:
@@ -31,7 +31,7 @@ NUS_SERVICE = "6e400001-b5a3-f393-e0a9-e50e24dcca9e"
 NUS_RX = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"  # host writes here
 NUS_TX = "6e400003-b5a3-f393-e0a9-e50e24dcca9e"  # device notifies here
 
-DEVICE_NAME_PREFIX = "Bellwether-"
+DEVICE_NAME_PREFIX = "Shepherd-"
 
 # WinRT does not let a central request an ATT MTU — bleak exposes mtu_size
 # read-only, and only once a GATT session exists. Windows has been seen to

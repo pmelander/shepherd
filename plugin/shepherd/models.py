@@ -1,4 +1,4 @@
-"""What Bellwether knows about a herd of agents.
+"""What Shepherd knows about a herd of agents.
 
 Field names and the status vocabulary come from Herdr's own `agent list`
 output, verified live against Herdr 0.8.2 (socket protocol 20). Nothing here
@@ -12,7 +12,7 @@ import re
 from dataclasses import dataclass
 
 # Herdr pane ids are workspace-qualified, e.g. "w2:p1" or "wA:p1". They are
-# the only join key Bellwether uses, so workspace_id is redundant for lookup.
+# the only join key Shepherd uses, so workspace_id is redundant for lookup.
 #
 # This pattern is a cheap second line of defence, not the primary one. The
 # real guard is the allowlist in the actions layer, which only accepts a
@@ -51,7 +51,7 @@ class AgentStatus(enum.Enum):
     def parse(cls, value: object) -> "AgentStatus":
         """Never raise on an unrecognised status.
 
-        A status Bellwether does not know is strictly better rendered as
+        A status Shepherd does not know is strictly better rendered as
         UNKNOWN than as a crash or, worse, as a stale previous value.
         """
         if isinstance(value, str):

@@ -15,7 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugin"))
 
-from bellwether.frame import (  # noqa: E402
+from shepherd.frame import (  # noqa: E402
     ALIAS_LEN,
     MAX_AGENTS,
     PROMPT_MAX,
@@ -26,7 +26,7 @@ from bellwether.frame import (  # noqa: E402
     disambiguate,
     truncate_prompt,
 )
-from bellwether.models import Agent, AgentStatus, HerdSnapshot  # noqa: E402
+from shepherd.models import Agent, AgentStatus, HerdSnapshot  # noqa: E402
 
 T0 = datetime(2026, 9, 5, 10, 21, 30, tzinfo=timezone.utc)
 
