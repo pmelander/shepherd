@@ -94,7 +94,36 @@ enum ShepherdParse {
   SHEPHERD_BAD_VERSION = 2,
   SHEPHERD_MALFORMED = 3,
   SHEPHERD_DETAIL = 4,     // a `deet` reply, parsed into ShepherdDetail
+  SHEPHERD_REKEY = 5,      // a `key` frame, parsed into ShepherdRekey
 };
+
+// The shared secret is 32 bytes, carried as lowercase hex.
+#define SHEPHERD_SECRET_BYTES 32
+#define SHEPHERD_SECRET_HEX_LEN (SHEPHERD_SECRET_BYTES * 2 + 1)
+
+// A request to replace the shared secret. Verified against the CURRENT key
+// before anything is stored — see shepherd_secret.cpp.
+struct ShepherdRekey {
+  char hex[SHEPHERD_SECRET_HEX_LEN];
+  char ts[SHEPHERD_TS_LEN];
+  char mac[SHEPHERD_MAC_LEN];
+
+  void clear() { hex[0] = 0; ts[0] = 0; mac[0] = 0; }
+};
+
+// True when every character is a lowercase hex digit and there are exactly
+// the right number of them. Checked before the MAC rather than after: a
+// malformed key that somehow verified would be stored and brick the link.
+inline bool shepherdIsSecretHex(const char* h) {
+  if (!h) return false;
+  size_t n = strlen(h);
+  if (n != SHEPHERD_SECRET_BYTES * 2) return false;
+  for (size_t i = 0; i < n; i++) {
+    const char c = h[i];
+    if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return false;
+  }
+  return true;
+}
 
 // One agent's last answer, as fetched on demand.
 struct ShepherdDetail {
@@ -204,6 +233,7 @@ inline ShepherdParse shepherdParse(const char* line, ShepherdFrame* out) {
   const char* t = doc["t"] | (const char*)nullptr;
   if (!t) return SHEPHERD_NOT_MINE;
   if (strcmp(t, "deet") == 0) return SHEPHERD_DETAIL;   // caller re-parses
+  if (strcmp(t, "key") == 0) return SHEPHERD_REKEY;     // caller re-parses
   if (strcmp(t, "snap") != 0) return SHEPHERD_NOT_MINE;
 
   out->clear();
@@ -267,6 +297,38 @@ inline bool shepherdParseDetail(const char* line, ShepherdDetail* out) {
   // readable". The screen says so rather than showing a blank.
   _shCopy(out->body, sizeof(out->body), doc["b"] | "");
   return true;
+}
+
+// Parse a `key` frame. Shape only — the signature is checked by the caller,
+// which is the only place that knows the current secret.
+inline bool shepherdParseRekey(const char* line, ShepherdRekey* out) {
+  if (!line || !out) return false;
+  JsonDocument doc;
+  if (deserializeJson(doc, line)) return false;
+  const char* t = doc["t"] | (const char*)nullptr;
+  if (!t || strcmp(t, "key") != 0) return false;
+  if ((doc["v"] | 0) != SHEPHERD_PROTOCOL_VERSION) return false;
+  const char* hex = doc["k"] | (const char*)nullptr;
+  const char* ts = doc["ts"] | (const char*)nullptr;
+  const char* mac = doc["mac"] | (const char*)nullptr;
+  if (!shepherdIsSecretHex(hex)) return false;
+  if (!ts || !*ts || !mac || strlen(mac) != SHEPHERD_MAC_LEN - 1) return false;
+  out->clear();
+  _shCopy(out->hex, sizeof(out->hex), hex);
+  _shCopy(out->ts, sizeof(out->ts), ts);
+  _shCopy(out->mac, sizeof(out->mac), mac);
+  return true;
+}
+
+// The acknowledgement, proving the new key is stored and usable.
+inline size_t shepherdBuildKeyAck(char* buf, size_t cap, const char* ts,
+                                  const char* proof) {
+  if (!buf || !ts || !proof || !*ts || !*proof) return 0;
+  int n = snprintf(buf, cap,
+                   "{\"t\":\"kack\",\"v\":%d,\"ts\":\"%s\",\"f\":\"%s\"}\n",
+                   SHEPHERD_PROTOCOL_VERSION, ts, proof);
+  if (n < 0 || (size_t)n >= cap) return 0;
+  return (size_t)n;
 }
 
 // ------------------------------------------------------------- elapsed

@@ -240,9 +240,22 @@ it on the wrong one.
 - **Every attempt is audited**, refusals included, to `HERDR_PLUGIN_STATE_DIR` — outside
   any repo, because the log holds full prompt text.
 
+- **The secret can be rotated** without a USB cable. The plugin action *Shepherd:
+  rotate the shared secret* signs a new key with the current one; the device stores it
+  in NVS and returns a MAC computed with the new key; the relay writes it to disk only
+  after that proof verifies. Interrupt it anywhere before then and both sides still hold
+  the old key — the failure worth engineering against is the two halves disagreeing,
+  which presents as a device that connects perfectly and refuses everything.
+
 What this does not defend against: anyone who can read the firmware image or the relay's
-config file. Both hold the secret in the clear. See [`TODOS.md`](TODOS.md) for the
-bond-hardening and key-rotation work that is still open.
+config file. Both hold the secret in the clear. Nor an active MITM present at the moment
+of rotation — LE Secure Connections' ECDH defeats a *passive* eavesdropper even under
+Just Works, but an attacker who MITM'd the original pairing could MITM a rotation.
+
+Two operational notes. A factory reset drops the device back to its build-time key by
+design, so a rotated pair must be rotated again afterwards. And `firmware/secret.ini`
+still holds whatever was flashed, so a reflash reverts the device while the relay keeps
+the rotated key — `start.py --secret-flag` prints the current value to paste back.
 
 ## Tests
 

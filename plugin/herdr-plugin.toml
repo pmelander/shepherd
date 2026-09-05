@@ -46,6 +46,15 @@ title = "Shepherd: print the firmware secret flag"
 contexts = ["global"]
 command = ["py", "-3", "start.py", "--secret-flag"]
 
+# Replace the shared secret without a USB cable. Drops a marker the running
+# relay picks up; the relay signs the new key with the old one, waits for the
+# device to prove it stored it, and only then writes the new key to disk.
+[[actions]]
+id = "rotate-key"
+title = "Shepherd: rotate the shared secret"
+contexts = ["global"]
+command = ["py", "-3", "start.py", "--rotate-key"]
+
 # Dump the environment Herdr injects. Kept from bring-up: when the relay
 # misbehaves under Herdr but works by hand, the difference is almost always
 # in here — HERDR_PLUGIN_CONFIG_DIR and HERDR_PLUGIN_STATE_DIR especially.

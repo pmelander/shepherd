@@ -362,6 +362,87 @@ void test_a_long_body_is_truncated_not_overflowed(void) {
     TEST_ASSERT_EQUAL(SHEPHERD_BODY_LEN - 1, (int)strlen(d.body));
 }
 
+// -------------------------------------------------------------- rekey
+
+void test_a_rekey_frame_is_recognised_and_parsed(void) {
+    const char* line =
+      "{\"t\":\"key\",\"v\":2,\"k\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\","
+      "\"ts\":\"2026-09-05T18:00:00Z\",\"mac\":\"0011223344556677\"}";
+    TEST_ASSERT_EQUAL(SHEPHERD_REKEY, shepherdParse(line, &f));
+
+    ShepherdRekey r;
+    TEST_ASSERT_TRUE(shepherdParseRekey(line, &r));
+    TEST_ASSERT_EQUAL_STRING("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", r.hex);
+    TEST_ASSERT_EQUAL_STRING("2026-09-05T18:00:00Z", r.ts);
+    TEST_ASSERT_EQUAL_STRING("0011223344556677", r.mac);
+}
+
+void test_a_key_that_is_not_the_right_shape_is_refused_before_the_mac(void) {
+    // Checked first on purpose. A malformed key that somehow got past the
+    // signature would be stored, and every action after it refused with no
+    // way to tell why from either end.
+    TEST_ASSERT_FALSE(shepherdIsSecretHex(nullptr));
+    TEST_ASSERT_FALSE(shepherdIsSecretHex(""));
+    TEST_ASSERT_FALSE(shepherdIsSecretHex("abcd"));               // too short
+    TEST_ASSERT_FALSE(shepherdIsSecretHex("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));  // odd length
+    TEST_ASSERT_FALSE(shepherdIsSecretHex("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));  // too long
+    TEST_ASSERT_FALSE(shepherdIsSecretHex("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"));  // uppercase
+    TEST_ASSERT_FALSE(shepherdIsSecretHex("zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"));  // not hex
+    TEST_ASSERT_TRUE(shepherdIsSecretHex("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
+}
+
+void test_a_rekey_missing_any_field_is_refused(void) {
+    ShepherdRekey r;
+    TEST_ASSERT_FALSE(shepherdParseRekey(
+        "{\"t\":\"key\",\"v\":2,\"ts\":\"x\",\"mac\":\"0011223344556677\"}", &r));
+    TEST_ASSERT_FALSE(shepherdParseRekey(
+        "{\"t\":\"key\",\"v\":2,\"k\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"mac\":\"0011223344556677\"}", &r));
+    TEST_ASSERT_FALSE(shepherdParseRekey(
+        "{\"t\":\"key\",\"v\":2,\"k\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"ts\":\"x\"}", &r));
+    // A short MAC would otherwise be compared against a full-length one and
+    // simply never match, which looks like a wrong key rather than junk.
+    TEST_ASSERT_FALSE(shepherdParseRekey(
+        "{\"t\":\"key\",\"v\":2,\"k\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"ts\":\"x\",\"mac\":\"00\"}", &r));
+    TEST_ASSERT_FALSE(shepherdParseRekey(
+        "{\"t\":\"key\",\"v\":99,\"k\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"ts\":\"x\",\"mac\":\"0011223344556677\"}", &r));
+    TEST_ASSERT_FALSE(shepherdParseRekey("{\"t\":\"snap\",\"v\":2,\"a\":[]}", &r));
+    TEST_ASSERT_FALSE(shepherdParseRekey(nullptr, &r));
+}
+
+void test_the_rekey_signs_over_the_new_key(void) {
+    // Mirrors rekey_message() in plugin/shepherd/auth.py. If these two ever
+    // disagree, rotation refuses every time and says only "bad signature".
+    char buf[160];
+    size_t n = shepherdCanonicalMessage(buf, sizeof(buf), "2026-09-05T18:00:00Z",
+                                        "device", "rekey", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    TEST_ASSERT_TRUE(n > 0);
+    TEST_ASSERT_EQUAL_STRING(
+        "2026-09-05T18:00:00Z|device|rekey|aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", buf);
+}
+
+void test_the_ack_signs_a_different_action_than_the_request(void) {
+    // Otherwise echoing the request back would pass as proof of storing it.
+    char buf[96];
+    size_t n = shepherdCanonicalMessage(buf, sizeof(buf), "2026-09-05T18:00:00Z",
+                                        "device", "rekeyed", nullptr);
+    TEST_ASSERT_TRUE(n > 0);
+    TEST_ASSERT_EQUAL_STRING("2026-09-05T18:00:00Z|device|rekeyed|", buf);
+}
+
+void test_builds_the_key_ack(void) {
+    char buf[96];
+    size_t n = shepherdBuildKeyAck(buf, sizeof(buf), "2026-09-05T18:00:00Z",
+                                   "0011223344556677");
+    TEST_ASSERT_TRUE(n > 0);
+    TEST_ASSERT_EQUAL_STRING(
+        "{\"t\":\"kack\",\"v\":2,\"ts\":\"2026-09-05T18:00:00Z\","
+        "\"f\":\"0011223344556677\"}\n", buf);
+
+    char tiny[8];
+    TEST_ASSERT_EQUAL(0, shepherdBuildKeyAck(tiny, sizeof(tiny), "x", "y"));
+    TEST_ASSERT_EQUAL(0, shepherdBuildKeyAck(buf, sizeof(buf), "", "y"));
+}
+
 // ------------------------------------------------------------ long text
 
 void test_a_long_question_is_truncated_not_overflowed(void) {
@@ -496,6 +577,12 @@ int main(int, char**) {
     RUN_TEST(test_an_empty_body_is_an_answer_not_a_failure);
     RUN_TEST(test_a_detail_reply_needs_a_pane_and_a_matching_version);
     RUN_TEST(test_a_long_body_is_truncated_not_overflowed);
+    RUN_TEST(test_a_rekey_frame_is_recognised_and_parsed);
+    RUN_TEST(test_a_key_that_is_not_the_right_shape_is_refused_before_the_mac);
+    RUN_TEST(test_a_rekey_missing_any_field_is_refused);
+    RUN_TEST(test_the_rekey_signs_over_the_new_key);
+    RUN_TEST(test_the_ack_signs_a_different_action_than_the_request);
+    RUN_TEST(test_builds_the_key_ack);
     RUN_TEST(test_a_long_question_is_truncated_not_overflowed);
     RUN_TEST(test_builds_an_act_frame);
     RUN_TEST(test_act_frame_without_a_decision_id);

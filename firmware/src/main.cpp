@@ -4,6 +4,7 @@
 #include "ble_bridge.h"
 #include "data.h"
 #include "buddy.h"
+#include "shepherd_secret.h"
 #include "shepherd_ui.h"
 
 TFT_eSprite spr = TFT_eSprite(&M5.Lcd);
@@ -23,6 +24,7 @@ static void startBt() {
   uint8_t mac[6] = {0};
   esp_read_mac(mac, ESP_MAC_BT);
   snprintf(btName, sizeof(btName), "Shepherd-%02X%02X", mac[4], mac[5]);
+  shepherdSecretBegin();   // before anything can be asked to sign
   bleInit(btName);
   // State the bonding posture once at boot. "Shepherd is not connecting" is
   // a question that gets asked at the radio layer first, and knowing whether
@@ -372,6 +374,10 @@ static void applyReset(uint8_t idx) {
     _prefs.end();
     LittleFS.format();
     bleClearBonds();
+    // Back to the key it left the workshop with. A device that kept a
+    // rotated secret through a factory reset would come back "clean" and
+    // still refuse every action, which is the worst kind of reset.
+    shepherdSecretForget();
   }
   delay(300);
   ESP.restart();
@@ -849,6 +855,7 @@ void drawInfo() {
     // from the outside - a stranger just sees pairing fail - so this is the
     // only place you can confirm the door is actually shut.
     ln("  paired    %s", bleBondCount() > 0 ? "yes, closed" : "no, OPEN");
+    ln("  key       %s", shepherdSecretRotated() ? "rotated" : "as flashed");
     uint32_t age = (millis() - tama.lastUpdated) / 1000;
     ln("  last msg  %lus", (unsigned long)age);
     ln("  state     %s", stateNames[activeState]);

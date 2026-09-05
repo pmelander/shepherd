@@ -124,6 +124,86 @@ def verify(secret: bytes, presented: object, ts: str, pane_id: str,
     return hmac.compare_digest(expected, presented.lower())
 
 
+# ------------------------------------------------------------- rotation
+#
+# The secret is baked into the firmware at build time, which made it the one
+# real credential in the system and the one that could not be changed without
+# a USB cable and a physical reset. Rotation fixes that, and the shape of it
+# is chosen so that changing the key requires already holding the key:
+#
+#   relay -> device   {"t":"key","v":2,"k":<new hex>,"ts":...,"mac":...}
+#                     signed with the CURRENT secret, over a message that
+#                     contains the new one. Nobody without the current key
+#                     can substitute a key of their choosing.
+#   device -> relay   {"t":"kack","v":2,"ts":...,"f":...}
+#                     f is signed with the NEW secret, which proves the device
+#                     actually stored it rather than merely receiving it.
+#
+# The relay commits the new secret to disk only after that proof verifies. Get
+# interrupted anywhere before then and both sides still hold the old key.
+#
+# The new key does cross the link. That is acceptable under LE Secure
+# Connections, whose ECDH key agreement defeats a PASSIVE eavesdropper even in
+# Just Works mode; what it does not defend against is an active MITM present
+# at the moment of rotation, who would have had to MITM the original pairing
+# too. Said plainly rather than left implied.
+
+# A pane id is meaningless for a device-wide operation, so both messages use
+# this literal in that slot. It keeps one canonical-message shape across the
+# whole protocol instead of inventing a second one for the rare case.
+REKEY_PANE = "device"
+
+
+def rekey_message(ts: str, new_secret: bytes) -> tuple[str, str, str | None]:
+    """The (pane, action, decision) triple that a rekey signs over."""
+    return REKEY_PANE, "rekey", new_secret.hex()
+
+
+def sign_rekey(current: bytes, ts: str, new_secret: bytes) -> str:
+    """Authorise a rotation, using the key being replaced."""
+    return sign(current, ts, *rekey_message(ts, new_secret))
+
+
+def rekey_frame(current: bytes, ts: str, new_secret: bytes) -> dict:
+    return {
+        "t": "key",
+        "v": 2,
+        "k": new_secret.hex(),
+        "ts": ts,
+        "mac": sign_rekey(current, ts, new_secret),
+    }
+
+
+def ack_proof(new_secret: bytes, ts: str) -> str:
+    """What the device must return to prove it holds the new key.
+
+    Signed with the NEW secret over a DIFFERENT action than the request, so a
+    replayed rekey frame is not itself a valid acknowledgement of one.
+    """
+    return sign(new_secret, ts, REKEY_PANE, "rekeyed", None)
+
+
+def verify_ack(new_secret: bytes, ts: str, presented: object) -> bool:
+    if not isinstance(presented, str) or len(presented) != MAC_HEX_LEN:
+        return False
+    return hmac.compare_digest(ack_proof(new_secret, ts), presented.lower())
+
+
+def new_secret() -> bytes:
+    return secrets.token_bytes(SECRET_BYTES)
+
+
+def save_secret(raw: bytes, path: Path | None = None) -> Path:
+    """Overwrite the stored secret. Called only after the device acked."""
+    if len(raw) != SECRET_BYTES:
+        raise ValueError(f"expected {SECRET_BYTES} bytes, got {len(raw)}")
+    p = path or (config_dir() / SECRET_FILENAME)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(raw.hex(), encoding="utf-8")
+    with_suppressed_oserror(lambda: os.chmod(p, 0o600))
+    return p
+
+
 def build_flag(secret: bytes) -> str:
     r"""The PlatformIO flag that bakes this secret into the firmware.
 

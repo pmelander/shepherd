@@ -25,21 +25,31 @@ Not verified: an actual second central being turned away. No second BLE host was
 available. The guard is armed and the non-regression is proven; the refusal path
 itself has only been read, not run.
 
-**Key rotation: still open.** The HMAC secret is still a build-time flag in
-plaintext, so rotating it means the BtnG0+BtnRST dance and a reflash. The one real
-credential in the system remains unrotatable in practice.
+**Key rotation: done.** `settings`-free: the plugin action
+**Shepherd: rotate the shared secret** (or `start.py --rotate-key`) drops a marker
+the running relay picks up within a second. The relay signs a new key with the
+*current* one, the device verifies, stores it in NVS and returns a MAC computed
+with the *new* key, and only then does the relay write it to disk. No USB, no SD
+card, no reflash.
 
-The idea worth trying first is a signed re-key over the link itself: the relay
-sends a new secret in a frame signed with the *current* one, the device verifies,
-stores it in NVS and acks, and the relay only writes the new secret to its config
-once the ack lands. Rotation then requires possession of the current key, which is
-exactly the right property, and it needs no SD card and no reflash. The new key
-does cross the link — acceptable under LE Secure Connections, whose ECDH defeats a
-*passive* eavesdropper even in Just Works mode; the residual risk is an active MITM
-present at rotation time, who would have had to MITM the original pairing too.
+Ordering is the design: interrupt it anywhere before the proof verifies and both
+sides still hold the old key. The failure worth engineering against is the two
+halves disagreeing, because that presents as a device that pairs, connects, draws
+the herd perfectly and refuses every action.
 
-**Effort:** M
-**Priority:** P3
+Verified live end to end: secret `7889f30f...` -> `f1b4e529...`, and a reboot
+reports `[key] using rotated secret from NVS`.
+
+Residual, and stated rather than implied: the new key crosses the link. LE Secure
+Connections' ECDH defeats a *passive* eavesdropper even in Just Works mode, so the
+exposure is an active MITM present at the moment of rotation - who would have had
+to MITM the original pairing too. And a factory reset drops back to the build-time
+key by design, so a rotated pair needs rotating again afterwards.
+
+Left over: `firmware/secret.ini` still holds the *original* key, so a reflash
+reverts the device while the relay keeps the rotated one. `start.py --secret-flag`
+prints the current value to paste back. Worth automating if rotation becomes
+routine rather than occasional.
 
 ### ~~Key lock / screen-off state for pocket carry~~ — DONE
 

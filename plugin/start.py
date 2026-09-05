@@ -13,6 +13,7 @@ whole point of that path.
     py -3 start.py --probe-env     # dump the injected environment and exit
     py -3 start.py --once          # one frame to the device, then exit
     py -3 start.py --secret-flag   # the build flag firmware/secret.ini needs
+    py -3 start.py --rotate-key    # ask the running relay to rotate the key
 """
 
 from __future__ import annotations
@@ -37,9 +38,9 @@ from shepherd.auth import (
     config_dir,
     load_or_create_secret,
 )
-from shepherd.frame import FrameBuilder
+from shepherd.frame import FrameBuilder, iso, utcnow
 from shepherd.herdr import CliHerdrSource, herdr_binary
-from shepherd.runner import Runner, watch_herdr
+from shepherd.runner import Runner, rotate_marker, watch_herdr
 from shepherd.singleton import AlreadyRunning, acquire
 
 # Long enough to cover the outgoing relay's 5s watchdog poll and its BLE
@@ -109,6 +110,25 @@ def secret_flag() -> int:
     print("# paste into firmware/secret.ini under [env:cardputer-adv]",
           file=sys.stderr)
     print(flag)
+    return 0
+
+
+def rotate_key() -> int:
+    """Ask the running relay to rotate the shared secret.
+
+    A request rather than the act itself. Rotation needs the BLE link, and
+    the link is held by the relay that is already running — a second process
+    could not take it even if it wanted to, because the lock would refuse it.
+    So this drops a marker the relay picks up within a second, and the actual
+    exchange and the writing of the new key happen over there.
+    """
+    marker = rotate_marker()
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(iso(utcnow()), encoding="utf-8")
+    print(f"requested: {marker}", file=sys.stderr)
+    print("the running relay will rotate within a second or so; watch "
+          "`herdr plugin log list --plugin shepherd` for the result",
+          file=sys.stderr)
     return 0
 
 
@@ -185,6 +205,8 @@ def main() -> int:
                     help="dump the injected environment and exit")
     ap.add_argument("--once", action="store_true",
                     help="send a single frame and exit")
+    ap.add_argument("--rotate-key", action="store_true",
+                    help="ask the running relay to replace the shared secret")
     ap.add_argument("--secret-flag", action="store_true",
                     help="print the PlatformIO flag for firmware/secret.ini, "
                          "generating the secret on first run")
@@ -195,6 +217,8 @@ def main() -> int:
         return probe_env()
     if args.secret_flag:
         return secret_flag()
+    if args.rotate_key:
+        return rotate_key()
     if args.once:
         return asyncio.run(once())
     return asyncio.run(serve())

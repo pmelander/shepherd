@@ -33,9 +33,15 @@ from pathlib import Path
 from typing import Awaitable, Callable, Mapping
 
 from .actions import ActionGate, PendingDecision, fingerprint, parse_action
-from .auth import load_or_create_secret
+from .auth import (
+    load_or_create_secret,
+    new_secret,
+    rekey_frame,
+    save_secret,
+    verify_ack,
+)
 from .events import EventStreamError, PipeEventSource
-from .frame import FrameBuilder
+from .frame import FrameBuilder, iso, utcnow
 from .herdr import CliHerdrSource, HerdrSource
 from .models import AgentStatus, HerdSnapshot
 from .prompt import parse_prompt
@@ -98,6 +104,22 @@ KEEPALIVE = 10.0
 # comparison against cached state, not a Herdr call.
 TICK = 1.0
 
+# Rotation is asked for by dropping this file in the state directory, which
+# `start.py --rotate-key` does. A file rather than a socket or a signal
+# because the relay that must perform the rotation is the one holding the BLE
+# link, so the request has to reach a process that is already running, and a
+# file is the one IPC that needs no new listener and survives the relay not
+# being up yet.
+ROTATE_MARKER = "rotate.request"
+
+# How long to wait for the device to prove it stored the new key.
+ROTATE_TIMEOUT = 10.0
+
+
+def rotate_marker() -> Path:
+    base = os.environ.get("HERDR_PLUGIN_STATE_DIR")
+    return (Path(base) if base else Path.home() / ".shepherd") / ROTATE_MARKER
+
 
 @dataclass
 class Runner:
@@ -120,6 +142,11 @@ class Runner:
     _prompts: dict[str, tuple[int, str]] = field(default_factory=dict, init=False)
     _dirty: bool = field(default=True, init=False)
     _stop: bool = field(default=False, init=False)
+    # Set while a rotation is in flight; the action loop hands the ack here
+    # rather than trying to interpret it, because only the push loop knows
+    # which new key it is waiting to hear about.
+    _rekey_pending: tuple[str, bytes] | None = field(default=None, init=False)
+    _rekey_ok: bool = field(default=False, init=False)
 
     # -- herd state ---------------------------------------------------------
 
@@ -268,11 +295,59 @@ class Runner:
             self.secret = load_or_create_secret()
         return self.secret
 
+    async def _rotate(self, transport: Transport, gate: ActionGate) -> None:
+        """Replace the shared secret, if the device will prove it took it.
+
+        Ordering is the whole design. The relay writes nothing to disk until
+        the device has returned a MAC computed with the NEW key, so every way
+        this can be interrupted — link drop, power cut, the device refusing —
+        leaves both sides still holding the OLD key and still working. The
+        one outcome worth engineering against is the two halves disagreeing,
+        because that bricks the link with no error message that says so.
+        """
+        marker = rotate_marker()
+        fresh = new_secret()
+        ts = iso(utcnow())
+        current = self._secret()
+        if current is None:
+            log.warning("rotation asked for but signatures are disabled")
+            marker.unlink(missing_ok=True)
+            return
+
+        self._rekey_pending = (ts, fresh)
+        self._rekey_ok = False
+        log.info("rotating the shared secret")
+        await transport.send(self.builder.encode(rekey_frame(current, ts, fresh)))
+
+        deadline = self.clock() + ROTATE_TIMEOUT
+        while self.clock() < deadline and not self._rekey_ok and not self._stop:
+            await self.sleep(self.tick)
+
+        pending, self._rekey_pending = self._rekey_pending, None
+        if not self._rekey_ok:
+            log.error("rotation failed: no valid acknowledgement in %.0fs; "
+                      "both sides still hold the old key", ROTATE_TIMEOUT)
+            marker.unlink(missing_ok=True)
+            return
+
+        path = save_secret(fresh)
+        self.secret = fresh
+        gate.secret = fresh
+        marker.unlink(missing_ok=True)
+        log.info("rotation complete; new secret written to %s", path)
+        log.info("update firmware/secret.ini before the next reflash, or the "
+                 "device will fall back to its build-time key")
+
     async def _push_loop(self, transport: Transport, gate: ActionGate) -> None:
         last_poll = -1e9
         last_send = -1e9
         while not self._stop:
             now = self.clock()
+
+            # Cheap: one stat per tick, and rotation is a thing that happens
+            # by hand a few times in a device's life.
+            if rotate_marker().exists():
+                await self._rotate(transport, gate)
             if now - last_poll >= self.poll_interval:
                 last_poll = now
                 await self.refresh()
@@ -302,6 +377,9 @@ class Runner:
                 raw = json.loads(line)
             except ValueError:
                 continue
+            if isinstance(raw, dict) and raw.get("t") == "kack":
+                self._on_rekey_ack(raw)
+                continue
             req = parse_action(raw)
             if req is None:
                 # Junk from the peer gets silence, not a diagnostic it can
@@ -322,6 +400,22 @@ class Runner:
                 # Either the world moved or we just changed it; the device's
                 # picture is stale either way.
                 self._dirty = True
+
+    def _on_rekey_ack(self, raw: dict) -> None:
+        """Accept the device's proof that it stored the new key.
+
+        Checked against the key we sent and the timestamp we sent it with, so
+        a replayed ack from an earlier rotation proves nothing about this one.
+        """
+        pending = self._rekey_pending
+        if pending is None:
+            log.debug("unexpected rekey ack; ignoring")
+            return
+        ts, fresh = pending
+        if raw.get("ts") != ts or not verify_ack(fresh, ts, raw.get("f")):
+            log.error("rekey ack did not verify; keeping the old key")
+            return
+        self._rekey_ok = True
 
     async def _event_loop(self) -> None:
         """Push subscriptions, best effort.
