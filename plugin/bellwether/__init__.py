@@ -6,9 +6,20 @@ testable without Herdr running and without the device attached:
     models.py   what an agent is; Herdr's status vocabulary, verbatim
     herdr.py    the HerdrSource seam + the CLI-backed implementation
     events.py   per-pane push subscriptions over Herdr's named pipe
+    frame.py    snapshot + events -> the bytes that go over BLE
 """
 
 from .models import Agent, AgentStatus, HerdSnapshot, is_pane_id
+from .events import (
+    EventSource,
+    EventStreamError,
+    PipeEventSource,
+    StatusEvent,
+    build_subscribe_request,
+    parse_line,
+    socket_path,
+)
+from .frame import PROTOCOL_VERSION, FrameBuilder
 from .herdr import (
     CliHerdrSource,
     CommandResult,
@@ -27,4 +38,13 @@ __all__ = [
     "HerdrError",
     "HerdrSource",
     "herdr_binary",
+    "EventSource",
+    "EventStreamError",
+    "PipeEventSource",
+    "StatusEvent",
+    "build_subscribe_request",
+    "parse_line",
+    "socket_path",
+    "FrameBuilder",
+    "PROTOCOL_VERSION",
 ]
