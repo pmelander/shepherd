@@ -7,6 +7,9 @@ testable without Herdr running and without the device attached:
     herdr.py    the HerdrSource seam + the CLI-backed implementation
     events.py   per-pane push subscriptions over Herdr's named pipe
     frame.py    snapshot + events -> the bytes that go over BLE
+    transport.py  the BLE link; chunking and reassembly
+    prompt.py   reading a permission prompt, choosing which keys to send
+    actions.py  the send-time safety layer: re-verify, or refuse
 """
 
 from .models import Agent, AgentStatus, HerdSnapshot, is_pane_id
@@ -19,7 +22,18 @@ from .events import (
     parse_line,
     socket_path,
 )
+from .actions import (
+    Action,
+    ActionGate,
+    ActionRequest,
+    ActionResult,
+    PendingDecision,
+    fingerprint,
+    parse_action,
+)
 from .frame import PROTOCOL_VERSION, FrameBuilder
+from .prompt import PromptError, parse_prompt, plan_approve, plan_deny
+from .transport import BleTransport, Transport, TransportError
 from .herdr import (
     CliHerdrSource,
     CommandResult,
@@ -47,4 +61,18 @@ __all__ = [
     "socket_path",
     "FrameBuilder",
     "PROTOCOL_VERSION",
+    "Action",
+    "ActionGate",
+    "ActionRequest",
+    "ActionResult",
+    "PendingDecision",
+    "fingerprint",
+    "parse_action",
+    "PromptError",
+    "parse_prompt",
+    "plan_approve",
+    "plan_deny",
+    "BleTransport",
+    "Transport",
+    "TransportError",
 ]
