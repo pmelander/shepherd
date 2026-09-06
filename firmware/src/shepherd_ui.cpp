@@ -132,7 +132,13 @@ static bool stale() {
 // ---------------------------------------------------------------- input
 
 bool shepherdUiApply(const char* line) {
-  ShepherdFrame parsed;
+  // STATIC, not a local. ShepherdFrame is 6604 bytes and loopTask gets an
+  // 8192-byte stack, so a local one overflowed it the instant a frame
+  // arrived: "***ERROR*** A stack overflow in task loopTask", reboot, repeat
+  // — a boot loop that only started once the option block pushed the struct
+  // past the line. Nothing here is re-entrant; the frame arrives on the loop
+  // task and nowhere else.
+  static ShepherdFrame parsed;
   ShepherdParse r = shepherdParse(line, &parsed);
   if (r == SHEPHERD_NOT_MINE) return false;
 
@@ -160,7 +166,7 @@ bool shepherdUiApply(const char* line) {
     // we asked for, so counting it as proof of life would let the staleness
     // rule be satisfied by our own curiosity rather than by the relay still
     // watching the herd.
-    ShepherdDetail d;
+    static ShepherdDetail d;   // 1KB; same reason as `parsed` above
     if (shepherdParseDetail(line, &d)) {
       g_detail = d;
       g_detailPending = false;

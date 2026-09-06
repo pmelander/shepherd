@@ -242,6 +242,18 @@ struct ShepherdFrame {
   }
 };
 
+// ShepherdFrame is BIG - about 6.6KB with twelve agents carrying option
+// blocks - and loopTask runs on an 8192-byte stack. One as a local variable
+// overflows it the moment a frame arrives, which presents as a boot loop
+// rather than as anything naming the struct. Every instance must be static
+// or a reference.
+//
+// The assert is a tripwire rather than a limit: if the struct grows past
+// this, the build fails here instead of the device rebooting in a pocket.
+static_assert(sizeof(ShepherdFrame) < 8000,
+              "ShepherdFrame is too big to live anywhere but .bss - see the "
+              "note above before raising this");
+
 // Copy a JSON string field into a fixed buffer, always NUL-terminated.
 inline void _shCopy(char* dst, size_t cap, const char* src) {
   if (!src) { dst[0] = 0; return; }
