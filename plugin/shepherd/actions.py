@@ -46,6 +46,7 @@ from typing import Callable, Deque, Mapping
 
 from .auth import verify as verify_mac
 from .herdr import HerdrError, HerdrSource
+from .frame import truncate_option
 from .models import is_pane_id
 from .prompt import (
     PromptError,
@@ -318,8 +319,12 @@ class ActionGate:
                 # prompt is often a permanent permission.
                 if req.choice >= len(shown.options):
                     return self._refuse(req, Refusal.UNKNOWN_CHOICE)
+                # truncate_option is how the frame shortened the label for
+                # the wire; the comparison inside applies it to the fresh
+                # label so both sides are the same shape.
                 keys = plan_choice(prompt, req.choice,
-                                   shown.options[req.choice])
+                                   shown.options[req.choice],
+                                   cut=truncate_option)
         except PromptError as e:
             return self._refuse(req, Refusal.UNSAFE_OPTIONS, detail=str(e))
 

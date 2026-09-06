@@ -352,3 +352,45 @@ def test_choosing_tolerates_the_decoration_the_host_stripped():
     # sends that back, so the comparison has to survive the same treatment.
     p = parse_prompt(BASH4)
     assert plan_choice(p, 2, "yes, and switch to AUTO mode") ==         ["down", "down", "enter"]
+
+
+LONG_PATH = ("Yes, and always allow access to "
+             "/home/user/work/scratch/signtest-with-a-long-name "
+             "from this project")
+BASH_LONG = f"""
+ Do you want to proceed?
+ ❯ 1. Yes
+   2. {LONG_PATH}
+   3. No
+
+ Esc to cancel
+"""
+
+
+def test_choosing_a_label_the_wire_had_to_cut():
+    """The regression that made widening options unpickable.
+
+    The frame truncates labels to fit the device's line, so what came back
+    ended in "..." while the fresh parse still read the whole path.
+    Comparing those two rejected every option long
+    enough to be cut - which on a Bash gate is exactly the ones that grant a
+    permission permanently. The guard was refusing length, not risk.
+
+    Every earlier fixture here used labels short enough to survive intact,
+    which is precisely why none of them caught it.
+    """
+    from shepherd.frame import truncate_option
+
+    p = parse_prompt(BASH_LONG)
+    shown = truncate_option(p.options[1].label)
+    assert shown.endswith("..."), "fixture must actually exercise truncation"
+    assert len(shown) < len(p.options[1].label)
+
+    assert plan_choice(p, 1, shown, cut=truncate_option) == ["down", "enter"]
+
+    # And the guard still guards: a cut label from a DIFFERENT option, or a
+    # prompt whose options moved, is still refused.
+    with pytest.raises(PromptError, match="on screen"):
+        plan_choice(p, 1, truncate_option("No"), cut=truncate_option)
+    with pytest.raises(PromptError, match="on screen"):
+        plan_choice(p, 2, shown, cut=truncate_option)

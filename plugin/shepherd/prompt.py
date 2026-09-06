@@ -57,6 +57,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from typing import Callable
 from dataclasses import dataclass
 
 # Deny is a single key on every prompt shape observed, verified end to end
@@ -301,7 +302,8 @@ def plan_deny() -> list[str]:
     return list(DENY_KEYS)
 
 
-def plan_choice(prompt: Prompt, index: int, shown_label: str) -> list[str]:
+def plan_choice(prompt: Prompt, index: int, shown_label: str,
+                cut: Callable[[str], str] = lambda s: s) -> list[str]:
     """Keys that select one specific option, chosen by a human.
 
     The counterpart to plan_approve, which picks the only option it considers
@@ -319,6 +321,14 @@ def plan_choice(prompt: Prompt, index: int, shown_label: str) -> list[str]:
     The caller has already compared a fingerprint over the whole option
     block, so this is belt and braces. It is cheap belt and braces, and the
     thing it guards against is silent.
+
+    `cut` is how the caller shortened the label for the wire, applied to the
+    FRESH label before comparing so the two sides are compared like with
+    like. Without it the check rejected every option long enough to be
+    truncated — which on a Bash gate is exactly the "Yes, and always allow
+    access to <long path>" ones, so the guard made the widening options the
+    only ones you could not pick. That is the opposite of a safety property:
+    it was not refusing risk, it was refusing length.
     """
     if not 0 <= index < len(prompt.options):
         raise PromptError(
@@ -326,7 +336,7 @@ def plan_choice(prompt: Prompt, index: int, shown_label: str) -> list[str]:
             f"{len(prompt.options)}"
         )
     target = prompt.options[index]
-    if normalize(shown_label) != target.normalized:
+    if normalize(shown_label) != normalize(cut(target.label)):
         raise PromptError(
             f"option {index} reads {target.label!r} now, "
             f"but {shown_label!r} was on screen"
