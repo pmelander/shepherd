@@ -72,6 +72,7 @@ static const uint16_t C_DONE    = 0x07E0;   // green: finished, unseen
 static const uint16_t C_WORKING = 0x3D7F;   // blue
 static const uint16_t C_STALE   = 0xF800;   // red: we cannot see
 static const uint16_t C_LOCK    = 0x7BEF;   // grey: keys are inert, not broken
+static const uint16_t C_SEL     = 0x2104;   // the selection band, and rules
 
 static uint16_t statusColour(const ShepherdAgent& a) {
   if (a.isBlocked()) return C_BLOCKED;
@@ -427,11 +428,20 @@ static void drawHerd(M5Canvas& spr, int W, int H) {
   int y = 18;
   for (int i = g_listTop; i < g_frame.count && i < g_listTop + SH_LIST_ROWS; i++) {
     const ShepherdAgent& a = g_frame.agents[i];
-    if (i == g_listSel) {
-      spr.fillRect(0, y - 1, W, lineH, 0x2104);   // a band, not an inversion:
-      spr.drawString(">", 1, y);                  // status colour must survive
-    }
-    spr.setTextColor(statusColour(a), C_BG);
+    // A band, not an inversion, so each row's status colour survives being
+    // selected. The band has to be the text background too: drawString paints
+    // its own background per glyph, so leaving it C_BG punched a black box
+    // behind every character and left the highlight showing only in the gaps.
+    const bool sel = (i == g_listSel);
+    const uint16_t bg = sel ? C_SEL : C_BG;
+    if (sel) spr.fillRect(0, y - 1, W, lineH, C_SEL);
+
+    // Colour first, then draw. The chevron used to be drawn before this line
+    // and so came out in whatever colour the row ABOVE had left set — the
+    // pointer telling you which agent is selected was tinted by a different
+    // one.
+    spr.setTextColor(statusColour(a), bg);
+    if (sel) spr.drawString(">", 1, y);
     spr.drawString(a.alias, 8, y);
     spr.setTextDatum(TR_DATUM);
     spr.drawString(a.status, W - 6, y);
@@ -480,7 +490,7 @@ static void drawDetail(M5Canvas& spr, int W, int H, int idx) {
   spr.setTextDatum(TR_DATUM);
   spr.drawString(right, W - 6, 18);
   spr.setTextDatum(TL_DATUM);
-  spr.drawFastHLine(0, 30, W, 0x2104);
+  spr.drawFastHLine(0, 30, W, C_SEL);
 
   const bool mine = strcmp(g_detail.pane, a.pane) == 0;
   const int rows = 6;
@@ -569,7 +579,7 @@ static void drawQueue(M5Canvas& spr, int W, int H, int idx) {
 void shepherdUiStrip(M5Canvas& spr, int W, int H) {
   const int top = H - SH_STRIP_H;
   spr.fillRect(0, top, W, SH_STRIP_H, C_BG);
-  spr.drawFastHLine(0, top, W, 0x2104);
+  spr.drawFastHLine(0, top, W, C_SEL);
   spr.setTextSize(1);
   spr.setTextDatum(TL_DATUM);
 
