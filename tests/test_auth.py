@@ -377,3 +377,44 @@ def test_parse_action_reads_the_choice_and_rejects_nonsense():
     # Absent is fine and means "no choice".
     assert parse_action({"t": "act", "i": "w9:p1", "k": "approve",
                          "r": "abc123"}).choice is None
+
+
+def test_the_audit_says_which_option_in_words(tmp_path):
+    # keys=["down","enter"] implies the second option, but a log that records
+    # a cursor walk and leaves the reader counting is not a record of what was
+    # consented to - and here index 0 vs index 1 is one approval versus a
+    # permission that outlives it.
+    import json
+
+    audit = tmp_path / "a.jsonl"
+    src = FakeSource(BASH4)
+    g = ActionGate(source=src, audit=audit, secret=SECRET)
+    g.observe_frame(
+        frozenset({"w9:p1"}),
+        {"abc123": PendingDecision("w9:p1", fingerprint(BASH4), False, OPTS)},
+        ts=TS,
+    )
+    assert run(g.dispatch(chose(1))).ok
+
+    entry = json.loads(audit.read_text(encoding="utf-8").strip())
+    assert entry["choice"] == 1
+    assert entry["chose"] == OPTS[1]
+    assert entry["keys"] == ["down", "enter"]
+
+
+def test_an_approve_with_no_choice_logs_none(tmp_path):
+    # Absent rather than 0, so "took the relay's safe path" never reads in the
+    # log as "deliberately picked the first option".
+    import json
+
+    audit = tmp_path / "b.jsonl"
+    src = FakeSource(BASH4)
+    g = ActionGate(source=src, audit=audit, secret=SECRET)
+    g.observe_frame(
+        frozenset({"w9:p1"}),
+        {"abc123": PendingDecision("w9:p1", fingerprint(BASH4), False, OPTS)},
+        ts=TS,
+    )
+    assert run(g.dispatch(signed())).ok
+    entry = json.loads(audit.read_text(encoding="utf-8").strip())
+    assert "choice" not in entry and "chose" not in entry

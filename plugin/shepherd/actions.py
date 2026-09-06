@@ -373,6 +373,16 @@ class ActionGate:
             # the log answers "what was approved" without ambiguity.
             "shown": shown.fingerprint if shown else None,
         }
+        # Which option, in words. `keys` already implies it - ["down","enter"]
+        # is the second one - but a log that records a cursor walk and leaves
+        # the reader to count is not a record of what was consented to. On
+        # this prompt the difference between index 0 and index 1 is a single
+        # approval versus a permission that outlives it, and that is precisely
+        # the thing an audit trail exists to be unambiguous about.
+        if req.choice is not None:
+            entry["choice"] = req.choice
+            if shown and req.choice < len(shown.options):
+                entry["chose"] = shown.options[req.choice]
         path = self.audit or audit_path()
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
