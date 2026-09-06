@@ -15,6 +15,7 @@
 
 #include "shepherd_frame.h"
 #include "shepherd_lock.h"
+#include "shepherd_seen.h"
 #include "hal.h"
 
 // A frame older than this is not worth drawing. The host sends a keepalive
@@ -65,6 +66,10 @@ ShepherdAlarm shepherdUiAttention();
 // told, and a device that keeps chirping at someone already looking at it is
 // a device they will turn off.
 ShepherdAlarm shepherdUiTakeAlarm(bool unseen);
+
+// Diagnostics for the serial probe: what wants attention before the seen
+// filter, and what the device believes has been looked at.
+const char* shepherdUiSeenProbe();
 
 // Lock the keys immediately, without waiting out the idle window. Called
 // when the screen goes dark.

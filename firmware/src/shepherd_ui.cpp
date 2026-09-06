@@ -69,25 +69,9 @@ static char g_alarmedPane[SHEPHERD_PANE_LEN] = {0};
 static ShepherdAlarm g_alarmedKind = ShepherdAlarm::None;
 static uint32_t g_alarmedAt = 0;
 
-// What has been looked at ON THIS DEVICE, which is not what Herdr means by
-// seen. Herdr clears `done` when the TAB is focused on the laptop, so an
-// agent whose answer you read on the Cardputer stays done — and the LED,
-// which runs off the same state, blinked forever at someone who had already
-// been told.
-//
-// Keyed by pane AND kind: a different agent, or the same one going from
-// blocked to done, is a new thing to be told about and lights up again.
-static char g_seenPane[SHEPHERD_PANE_LEN] = {0};
-static ShepherdAlarm g_seenKind = ShepherdAlarm::None;
-
-// How long the thing has to be on an awake screen before it counts as looked
-// at. Not zero: the alarm WAKES the screen, so without a dwell the very next
-// frame would mark it seen and the light would go out before anyone turned
-// their head.
-#define SHEPHERD_SEEN_MS 3000
-static char g_viewingPane[SHEPHERD_PANE_LEN] = {0};
-static ShepherdAlarm g_viewingKind = ShepherdAlarm::None;
-static uint32_t g_viewingSince = 0;
+// What has been acknowledged ON THIS DEVICE, which is not what Herdr means
+// by seen. See shepherd_seen.h for the two ways this was got wrong first.
+static ShepherdSeen g_seen;
 
 // Colours chosen for a 240x135 IPS at arm's length: high contrast, few hues,
 // and status carried by colour AND text so it survives being glanced at.
@@ -259,11 +243,12 @@ static int attentionIndex(ShepherdAlarm* kind) {
   if (!g_everReceived || stale() || g_badVersion) return -1;
   // Showable, not answerable: an agent whose question was truncated still
   // stopped and still wants you. "You must open the laptop" is attention too.
-  int i = g_frame.firstShowable();
-  if (i >= 0) { *kind = ShepherdAlarm::Blocked; return i; }
-  i = g_frame.firstDone();
-  if (i >= 0) { *kind = ShepherdAlarm::Done; return i; }
-  return -1;
+  uint8_t k = SHEPHERD_SEEN_NONE;
+  const int i = g_seen.firstUnseen(g_frame, &k);
+  *kind = k == SHEPHERD_SEEN_BLOCKED ? ShepherdAlarm::Blocked
+        : k == SHEPHERD_SEEN_DONE    ? ShepherdAlarm::Done
+                                     : ShepherdAlarm::None;
+  return i;
 }
 
 // Whatever wants a human, before asking whether they have already looked.
@@ -273,47 +258,39 @@ static int pendingAttention(ShepherdAlarm* kind) {
   return attentionIndex(kind);
 }
 
-static bool alreadySeen(int idx, ShepherdAlarm kind) {
-  return idx >= 0 && kind == g_seenKind &&
-         strcmp(g_frame.agents[idx].pane, g_seenPane) == 0;
-}
-
-// Called from the draw path, which only runs while the screen is awake — so
-// being called at all is the evidence that someone could have looked.
+// Called when a key is pressed, and ONLY then. A keypress is the one thing
+// on this device that proves a person is present; a lit screen does not,
+// because the alarm lights it itself.
 static void noteViewed() {
   ShepherdAlarm kind;
   const int idx = pendingAttention(&kind);
-  if (idx < 0) { g_viewingPane[0] = 0; g_viewingKind = ShepherdAlarm::None; return; }
+  if (idx < 0) return;
+  g_seen.mark(g_frame.agents[idx].pane,
+              kind == ShepherdAlarm::Blocked ? SHEPHERD_SEEN_BLOCKED
+                                             : SHEPHERD_SEEN_DONE);
+}
 
-  const char* pane = g_frame.agents[idx].pane;
-  const uint32_t now = millis();
-  if (kind != g_viewingKind || strcmp(pane, g_viewingPane) != 0) {
-    strncpy(g_viewingPane, pane, sizeof(g_viewingPane) - 1);
-    g_viewingPane[sizeof(g_viewingPane) - 1] = 0;
-    g_viewingKind = kind;
-    g_viewingSince = now;
-    return;
-  }
-  if ((uint32_t)(now - g_viewingSince) >= SHEPHERD_SEEN_MS) {
-    strncpy(g_seenPane, pane, sizeof(g_seenPane) - 1);
-    g_seenPane[sizeof(g_seenPane) - 1] = 0;
-    g_seenKind = kind;
-  }
+// Diagnostics for the serial probe.
+const char* shepherdUiSeenProbe() {
+  static char buf[64];
+  ShepherdAlarm k;
+  const int idx = attentionIndex(&k);
+  snprintf(buf, sizeof(buf), "raw=%d/%s seen=%d", idx,
+           idx >= 0 ? g_frame.agents[idx].pane : "-", g_seen.count);
+  return buf;
 }
 
 ShepherdAlarm shepherdUiAttention() {
   ShepherdAlarm kind;
-  const int idx = attentionIndex(&kind);
-  if (alreadySeen(idx, kind)) return ShepherdAlarm::None;
+  attentionIndex(&kind);
   return kind;
 }
 
 ShepherdAlarm shepherdUiTakeAlarm(bool unseen) {
   ShepherdAlarm kind;
-  int idx = attentionIndex(&kind);
-  // Something already looked at is not something to make a noise about
-  // either. The nag exists for an agent nobody has noticed.
-  if (alreadySeen(idx, kind)) { idx = -1; kind = ShepherdAlarm::None; }
+  // attentionIndex already skips what has been acknowledged, so a thing
+  // someone reached for makes no further noise either.
+  const int idx = attentionIndex(&kind);
   if (idx < 0) {
     // Nothing waiting. Forget what we alarmed about, so the same agent
     // arriving again later is news again.
@@ -701,7 +678,6 @@ static void drawQueue(M5Canvas& spr, int W, int H, int idx) {
 #define SH_STRIP_H 22
 
 void shepherdUiStrip(M5Canvas& spr, int W, int H) {
-  noteViewed();
   const int top = H - SH_STRIP_H;
   spr.fillRect(0, top, W, SH_STRIP_H, C_BG);
   spr.drawFastHLine(0, top, W, C_SEL);
@@ -760,10 +736,6 @@ void shepherdUiStrip(M5Canvas& spr, int W, int H) {
 }
 
 void shepherdUiDraw(M5Canvas& spr, int W, int H) {
-  // Being drawn at all means the screen is awake: the dispatch that calls
-  // this sits inside `!napping && !screenOff`. That is the whole evidence
-  // for "somebody could have looked at this".
-  noteViewed();
   spr.fillSprite(C_BG);
   drawHeader(spr, W);
 
@@ -857,6 +829,11 @@ bool shepherdUiKey(HalKey k) {
   if (!shepherdUiActive()) return false;
 
   const uint32_t now = millis();
+
+  // Any key is someone acknowledging the device. Before the gates below, so
+  // the chord that unlocks it counts too — that is usually the first thing a
+  // hand does.
+  noteViewed();
 
   // The chord is handled before every other gate - version, staleness, and
   // whether Shepherd is even the thing being drawn - so it still works on a

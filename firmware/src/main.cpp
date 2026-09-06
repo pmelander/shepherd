@@ -1450,8 +1450,11 @@ void loop() {
   static uint32_t _probeNext = 0;
   if ((int32_t)(now - _probeNext) >= 0) {
     _probeNext = now + 2000;
-    Serial.printf("[shepherd] SERIAL-HEARTBEAT %lus ble=%d\n",
-                  (unsigned long)(now / 1000), (int)bleConnected());
+    Serial.printf("[shepherd] SERIAL-HEARTBEAT %lus ble=%d att=%d %s\n",
+                  (unsigned long)(now / 1000), (int)bleConnected(),
+                  (int)(shepherdUiActive() ? shepherdUiAttention()
+                                           : ShepherdAlarm::None),
+                  shepherdUiSeenProbe());
     Serial.flush();
   }
 #endif
