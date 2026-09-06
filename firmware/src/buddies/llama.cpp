@@ -8,7 +8,7 @@ extern TFT_eSprite spr;
 namespace llama {
 
 // Creamy wool. Warm off-white / beige (#EEDDB8 → RGB565 0xEEFD).
-static const uint16_t LLAMA_WOOL = 0xEEFD;
+static const uint16_t LLAMA_WOOL = 0xE6D4;   // warm cream, not paper
 
 // ─── SLEEP ───  neck tucked down, slow breath
 static void doSleep(uint32_t t) {

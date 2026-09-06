@@ -25,7 +25,7 @@ static void doSleep(uint32_t t) {
     0,1,5,1
   };
   uint8_t beat = (t / 5) % sizeof(SEQ);
-  buddyPrintSprite(P[SEQ[beat]], 5, 0, 0xFFFF);
+  buddyPrintSprite(P[SEQ[beat]], 5, 0, 0xEE51);
 
   // Z particles drift up-right
   int p1 = (t)     % 10;
@@ -65,7 +65,7 @@ static void doIdle(uint32_t t) {
     9,9,0,4,0
   };
   uint8_t beat = (t / 5) % sizeof(SEQ);
-  buddyPrintSprite(P[SEQ[beat]], 5, 0, 0xFFFF);
+  buddyPrintSprite(P[SEQ[beat]], 5, 0, 0xEE51);
 }
 
 // ─── BUSY ───  ~10s cycle, 6 poses + honk ticker
@@ -82,7 +82,7 @@ static void doBusy(uint32_t t) {
     0,1,0,1,0,1, 3,3, 0,1,0,1, 2,2, 4,4, 0,1, 5,5,0
   };
   uint8_t beat = (t / 5) % sizeof(SEQ);
-  buddyPrintSprite(P[SEQ[beat]], 5, 0, 0xFFFF);
+  buddyPrintSprite(P[SEQ[beat]], 5, 0, 0xEE51);
 
   static const char* const HONKS[] = { "h  ", "ho ", "hon", "onk", "nk!", "k! ", "!  ", "   " };
   buddySetColor(BUDDY_YEL);
@@ -106,7 +106,7 @@ static void doAttention(uint32_t t) {
   uint8_t beat = (t / 5) % sizeof(SEQ);
   uint8_t pose = SEQ[beat];
   int xOff = (pose == 4) ? ((t & 1) ? 2 : -2) : ((pose == 3) ? ((t & 1) ? 1 : -1) : 0);
-  buddyPrintSprite(P[pose], 5, 0, 0xFFFF, xOff);
+  buddyPrintSprite(P[pose], 5, 0, 0xEE51, xOff);
 
   if ((t / 2) & 1) {
     buddySetColor(BUDDY_RED);
@@ -138,7 +138,7 @@ static void doCelebrate(uint32_t t) {
   static const uint8_t SEQ[] = { 0,1,2,1,0, 3,4,3,4, 0,1,2,1,0, 5,5 };
   static const int8_t Y_SHIFT[] = { 0,-3,-7,-3,0, 0,0,0,0, 0,-3,-7,-3,0, 0,0 };
   uint8_t beat = (t / 3) % sizeof(SEQ);
-  buddyPrintSprite(P[SEQ[beat]], 5, Y_SHIFT[beat], 0xFFFF);
+  buddyPrintSprite(P[SEQ[beat]], 5, Y_SHIFT[beat], 0xEE51);
 
   static const uint16_t cols[] = { BUDDY_YEL, BUDDY_HEART, BUDDY_CYAN, BUDDY_WHITE, BUDDY_GREEN };
   for (int i = 0; i < 7; i++) {
@@ -164,7 +164,7 @@ static void doDizzy(uint32_t t) {
   static const uint8_t SEQ[] = { 0,1,0,1, 2,3, 0,1,0,1, 4,4, 2,3 };
   static const int8_t X_SHIFT[] = { -3,3,-3,3, 0,0, -3,3,-3,3, 0,0, 0,0 };
   uint8_t beat = (t / 4) % sizeof(SEQ);
-  buddyPrintSprite(P[SEQ[beat]], 5, 0, 0xFFFF, X_SHIFT[beat]);
+  buddyPrintSprite(P[SEQ[beat]], 5, 0, 0xEE51, X_SHIFT[beat]);
 
   static const int8_t OX[] = { 0, 5, 7, 5, 0, -5, -7, -5 };
   static const int8_t OY[] = { -5, -3, 0, 3, 5, 3, 0, -3 };
@@ -196,7 +196,7 @@ static void doHeart(uint32_t t) {
   };
   static const int8_t Y_BOB[] = { 0,-1,0,-1, 0,-1,0, -1,0,0, -1,0,0,0, -1,0,-1,0, -1,0 };
   uint8_t beat = (t / 5) % sizeof(SEQ);
-  buddyPrintSprite(P[SEQ[beat]], 5, Y_BOB[beat], 0xFFFF);
+  buddyPrintSprite(P[SEQ[beat]], 5, Y_BOB[beat], 0xEE51);
 
   buddySetColor(BUDDY_HEART);
   for (int i = 0; i < 5; i++) {
@@ -211,4 +211,4 @@ static void doHeart(uint32_t t) {
 
 }  // namespace goose
 
-extern const Species GOOSE_SPECIES = { "goose", 0xFFFF, { goose::doSleep, goose::doIdle, goose::doBusy, goose::doAttention, goose::doCelebrate, goose::doDizzy, goose::doHeart } };
+extern const Species GOOSE_SPECIES = { "goose", 0xEE51, { goose::doSleep, goose::doIdle, goose::doBusy, goose::doAttention, goose::doCelebrate, goose::doDizzy, goose::doHeart } };
