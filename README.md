@@ -329,4 +329,11 @@ instead, so the agent you are watching finish will never chirp at you. That is c
 and it is also why the alarm looked broken the first time it was tested on the pane in
 front of the tester.
 
+The device keeps its own idea of seen alongside that one. Herdr clears `done` when you
+focus the tab on the laptop; the Cardputer clears the light once the thing has been on
+its own awake screen for three seconds. Without that the LED blinked forever at someone
+who had already read the answer — Herdr was still right, it just was not answering the
+question the light was asking. Three seconds rather than none because the alarm *wakes*
+the screen, and a light that goes out before you turn your head has told you nothing.
+
 The rest of what is deliberately not done is in [`TODOS.md`](TODOS.md).

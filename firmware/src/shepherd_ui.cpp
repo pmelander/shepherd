@@ -69,6 +69,26 @@ static char g_alarmedPane[SHEPHERD_PANE_LEN] = {0};
 static ShepherdAlarm g_alarmedKind = ShepherdAlarm::None;
 static uint32_t g_alarmedAt = 0;
 
+// What has been looked at ON THIS DEVICE, which is not what Herdr means by
+// seen. Herdr clears `done` when the TAB is focused on the laptop, so an
+// agent whose answer you read on the Cardputer stays done — and the LED,
+// which runs off the same state, blinked forever at someone who had already
+// been told.
+//
+// Keyed by pane AND kind: a different agent, or the same one going from
+// blocked to done, is a new thing to be told about and lights up again.
+static char g_seenPane[SHEPHERD_PANE_LEN] = {0};
+static ShepherdAlarm g_seenKind = ShepherdAlarm::None;
+
+// How long the thing has to be on an awake screen before it counts as looked
+// at. Not zero: the alarm WAKES the screen, so without a dwell the very next
+// frame would mark it seen and the light would go out before anyone turned
+// their head.
+#define SHEPHERD_SEEN_MS 3000
+static char g_viewingPane[SHEPHERD_PANE_LEN] = {0};
+static ShepherdAlarm g_viewingKind = ShepherdAlarm::None;
+static uint32_t g_viewingSince = 0;
+
 // Colours chosen for a 240x135 IPS at arm's length: high contrast, few hues,
 // and status carried by colour AND text so it survives being glanced at.
 static const uint16_t C_BG      = 0x0000;
@@ -246,15 +266,54 @@ static int attentionIndex(ShepherdAlarm* kind) {
   return -1;
 }
 
+// Whatever wants a human, before asking whether they have already looked.
+// Internal: the seen bookkeeping needs to know what is pending even once it
+// has stopped being worth a light.
+static int pendingAttention(ShepherdAlarm* kind) {
+  return attentionIndex(kind);
+}
+
+static bool alreadySeen(int idx, ShepherdAlarm kind) {
+  return idx >= 0 && kind == g_seenKind &&
+         strcmp(g_frame.agents[idx].pane, g_seenPane) == 0;
+}
+
+// Called from the draw path, which only runs while the screen is awake — so
+// being called at all is the evidence that someone could have looked.
+static void noteViewed() {
+  ShepherdAlarm kind;
+  const int idx = pendingAttention(&kind);
+  if (idx < 0) { g_viewingPane[0] = 0; g_viewingKind = ShepherdAlarm::None; return; }
+
+  const char* pane = g_frame.agents[idx].pane;
+  const uint32_t now = millis();
+  if (kind != g_viewingKind || strcmp(pane, g_viewingPane) != 0) {
+    strncpy(g_viewingPane, pane, sizeof(g_viewingPane) - 1);
+    g_viewingPane[sizeof(g_viewingPane) - 1] = 0;
+    g_viewingKind = kind;
+    g_viewingSince = now;
+    return;
+  }
+  if ((uint32_t)(now - g_viewingSince) >= SHEPHERD_SEEN_MS) {
+    strncpy(g_seenPane, pane, sizeof(g_seenPane) - 1);
+    g_seenPane[sizeof(g_seenPane) - 1] = 0;
+    g_seenKind = kind;
+  }
+}
+
 ShepherdAlarm shepherdUiAttention() {
   ShepherdAlarm kind;
-  attentionIndex(&kind);
+  const int idx = attentionIndex(&kind);
+  if (alreadySeen(idx, kind)) return ShepherdAlarm::None;
   return kind;
 }
 
 ShepherdAlarm shepherdUiTakeAlarm(bool unseen) {
   ShepherdAlarm kind;
-  const int idx = attentionIndex(&kind);
+  int idx = attentionIndex(&kind);
+  // Something already looked at is not something to make a noise about
+  // either. The nag exists for an agent nobody has noticed.
+  if (alreadySeen(idx, kind)) { idx = -1; kind = ShepherdAlarm::None; }
   if (idx < 0) {
     // Nothing waiting. Forget what we alarmed about, so the same agent
     // arriving again later is news again.
@@ -642,6 +701,7 @@ static void drawQueue(M5Canvas& spr, int W, int H, int idx) {
 #define SH_STRIP_H 22
 
 void shepherdUiStrip(M5Canvas& spr, int W, int H) {
+  noteViewed();
   const int top = H - SH_STRIP_H;
   spr.fillRect(0, top, W, SH_STRIP_H, C_BG);
   spr.drawFastHLine(0, top, W, C_SEL);
@@ -700,6 +760,10 @@ void shepherdUiStrip(M5Canvas& spr, int W, int H) {
 }
 
 void shepherdUiDraw(M5Canvas& spr, int W, int H) {
+  // Being drawn at all means the screen is awake: the dispatch that calls
+  // this sits inside `!napping && !screenOff`. That is the whole evidence
+  // for "somebody could have looked at this".
+  noteViewed();
   spr.fillSprite(C_BG);
   drawHeader(spr, W);
 
