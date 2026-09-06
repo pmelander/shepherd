@@ -141,7 +141,8 @@ lock will (correctly) refuse you.
 
 | Screen | Keys |
 |---|---|
-| Queue (something is blocked) | `y` approve · `n` deny · `>` next · `del` herd list |
+| Queue, one option | `y` approve · `n` deny · `>` next · `del` herd list |
+| Queue, several options | `;` `.` pick · `y` send it · `n` deny · `>` next · `del` list |
 | Herd list | `;` `.` move · `enter` recap · `del` back to queue |
 | Recap | `;` `.` scroll · `,` `/` next agent · `del` back |
 | Anywhere | **`Fn`+`Del`** lock / unlock |
@@ -154,6 +155,14 @@ eventually type any sequence.
 
 The screen stays on when locked. This is a glance device; reading the herd without
 touching it is the whole point.
+
+**On multi-option prompts, the options are shown and you pick one.** A Claude Code Bash
+gate offers four, and three of them begin with "Yes": one is a single approval, one grants
+a glob permission that outlives the prompt, one turns off prompting for that agent
+entirely. The device marks the persistent ones with `!` and draws them amber, and starts
+the cursor on the plain "Yes" so a hurried thumb produces the narrow answer rather than
+the wide one. It will still send the wide one if you pick it — that is the point of
+showing them — but not by accident.
 
 ### The buddy
 
@@ -222,6 +231,11 @@ it on the wrong one.
   was actually on screen.
 - **Approve is refused for a truncated prompt.** Deny always works. The device can always
   say no; it may only say yes to something it showed you in full.
+- **A chosen option is bound to the signature**, and re-checked twice at send time: the
+  index must still be in range for the prompt as it reads *now*, and the label at that
+  index must still match what the device displayed. Both, because an off-by-one here
+  selects the neighbouring option — which on a Bash gate is usually a *permanent*
+  permission rather than a one-off yes.
 - **Everything is signed.** HMAC-SHA256 over `ts|pane|action|decision`, truncated to 64
   bits for a link that sometimes negotiates a 20-byte payload. The bond proves the peer is
   a device Windows once paired with; it does not prove it is *this* Cardputer, because

@@ -8,11 +8,17 @@
 // that need no board.
 //
 // Host -> device:
-//   {"t":"snap","v":2,"ts":"...","a":[
+//   {"t":"snap","v":3,"ts":"...","a":[
 //      {"i":"w9:p1","n":"elasmigr","s":"blocked","e":"...",
 //       "q":"Allow Bash(...)?","r":"a1b2c3d4e5f6","x":true,
-//       "d":"what this agent says it is doing"}],
+//       "d":"what this agent says it is doing",
+//       "o":["Yes","Yes, and don't ask again","No"],"w":"swn"}],
 //    "more":2,"why":"herdr unreachable"}
+//
+//   `o` is the option block and `w` classifies each one: s safe, w widening,
+//   n no, o other. The classification is the HOST's, deliberately, because
+//   "which of these Yeses grants a permission forever" must not be a
+//   judgement two implementations can disagree about.
 //
 //   `e` is absent when the host cannot honestly claim to know how long the
 //   agent has been in this state. `x` marks a question that was truncated for
@@ -20,7 +26,11 @@
 //   offer approve for them either.
 //
 // Device -> host:
-//   {"t":"act","i":"w9:p1","k":"approve","r":"a1b2c3d4e5f6"}
+//   {"t":"act","i":"w9:p1","k":"approve","r":"a1b2c3d4e5f6","c":1}
+//
+//   `c` is the option the human cycled to. It is inside the signed message,
+//   not merely beside it: otherwise a captured approve for "Yes" could have
+//   its index bumped to the "Yes, and don't ask again" underneath.
 //
 // Host -> device, in reply to k:"detail":
 //   {"t":"deet","v":2,"i":"w9:p1","b":"Done. Task #175078 ..."}
@@ -37,7 +47,8 @@
 // reported on screen rather than rendered, because drawing fields you do not
 // understand is how a glance device lies.
 // v2 added `d`, the per-agent recap shown on the detail screen.
-#define SHEPHERD_PROTOCOL_VERSION 2
+// v3 added `o`/`w`, the option block, and a fifth field to the signed message.
+#define SHEPHERD_PROTOCOL_VERSION 3
 
 // The host caps a frame at 12 agents (its MAX_AGENTS). The binding limit is
 // data.h's line-reassembly buffer, not the BLE ring: it holds one JSON line
@@ -60,6 +71,18 @@
 // One detail body. BODY_MAX in recap.py is 900; the device holds exactly one
 // at a time, for the agent whose screen is up.
 #define SHEPHERD_BODY_LEN 1024
+// Mirrors MAX_OPTIONS / OPTION_MAX in plugin/shepherd/frame.py.
+#define SHEPHERD_MAX_OPTIONS 6
+#define SHEPHERD_OPTION_LEN 41
+
+// What an option would do, as classified by the host's prompt parser and
+// carried on the wire rather than re-derived here. "Which of these Yeses
+// widens a permission forever" is a judgement that must not exist in two
+// implementations that can disagree.
+#define SHEPHERD_OPT_SAFE 's'      // plain Yes, this once
+#define SHEPHERD_OPT_WIDEN 'w'     // a qualified Yes: glob grant, auto mode
+#define SHEPHERD_OPT_NO 'n'
+#define SHEPHERD_OPT_OTHER 'o' 
 
 struct ShepherdAgent {
   char pane[SHEPHERD_PANE_LEN];
@@ -76,6 +99,10 @@ struct ShepherdAgent {
   char since[SHEPHERD_TS_LEN];
   bool truncated;
   bool hasQuestion;
+  // The choices, in screen order, with one classification character each.
+  char options[SHEPHERD_MAX_OPTIONS][SHEPHERD_OPTION_LEN];
+  char optKind[SHEPHERD_MAX_OPTIONS + 1];
+  int optCount;
 
   bool isBlocked() const { return strcmp(status, "blocked") == 0; }
   bool isDone() const { return strcmp(status, "done") == 0; }
@@ -263,6 +290,22 @@ inline ShepherdParse shepherdParse(const char* line, ShepherdFrame* out) {
       _shCopy(a.question, sizeof(a.question), q);
       a.hasQuestion = true;
     }
+    JsonArrayConst opts = row["o"];
+    const char* kinds = row["w"] | "";
+    if (!opts.isNull()) {
+      for (JsonVariantConst ov : opts) {
+        if (a.optCount >= SHEPHERD_MAX_OPTIONS) break;
+        const char* label = ov.as<const char*>();
+        if (!label || !*label) continue;
+        _shCopy(a.options[a.optCount], SHEPHERD_OPTION_LEN, label);
+        // Anything the host did not classify reads as "other", which the UI
+        // draws plainly rather than guessing at.
+        a.optKind[a.optCount] =
+            (int)strlen(kinds) > a.optCount ? kinds[a.optCount] : SHEPHERD_OPT_OTHER;
+        a.optCount++;
+      }
+      a.optKind[a.optCount] = 0;
+    }
     _shCopy(a.decision, sizeof(a.decision), row["r"] | (const char*)nullptr);
     _shCopy(a.recap, sizeof(a.recap), row["d"] | (const char*)nullptr);
     _shCopy(a.since, sizeof(a.since), row["e"] | (const char*)nullptr);
@@ -401,10 +444,13 @@ inline void shepherdFormatElapsed(char* buf, size_t cap, long secs) {
 // action's message.
 inline size_t shepherdCanonicalMessage(char* buf, size_t cap, const char* ts,
                                        const char* pane, const char* action,
-                                       const char* decision) {
+                                       const char* decision,
+                                       int choice = -1) {
   if (!buf || !ts || !pane || !action || !*ts || !*pane || !*action) return 0;
-  int n = snprintf(buf, cap, "%s|%s|%s|%s", ts, pane, action,
-                   (decision && *decision) ? decision : "");
+  char cpart[12] = {0};
+  if (choice >= 0) snprintf(cpart, sizeof(cpart), "%d", choice);
+  int n = snprintf(buf, cap, "%s|%s|%s|%s|%s", ts, pane, action,
+                   (decision && *decision) ? decision : "", cpart);
   if (n < 0 || (size_t)n >= cap) return 0;
   return (size_t)n;
 }
@@ -418,16 +464,20 @@ inline size_t shepherdCanonicalMessage(char* buf, size_t cap, const char* ts,
 inline size_t shepherdBuildAct(char* buf, size_t cap, const char* pane,
                                const char* action, const char* decision,
                                const char* ts = nullptr,
-                               const char* mac = nullptr) {
+                               const char* mac = nullptr,
+                               int choice = -1) {
   if (!buf || !pane || !action || !*pane || !*action) return 0;
   char rpart[SHEPHERD_DECISION_LEN + 8] = {0};
   if (decision && *decision)
     snprintf(rpart, sizeof(rpart), ",\"r\":\"%s\"", decision);
+  char cpart[16] = {0};
+  if (choice >= 0) snprintf(cpart, sizeof(cpart), ",\"c\":%d", choice);
   char spart[SHEPHERD_TS_LEN + SHEPHERD_MAC_LEN + 24] = {0};
   if (ts && *ts && mac && *mac)
     snprintf(spart, sizeof(spart), ",\"ts\":\"%s\",\"mac\":\"%s\"", ts, mac);
-  int n = snprintf(buf, cap, "{\"t\":\"act\",\"i\":\"%s\",\"k\":\"%s\"%s%s}\n",
-                   pane, action, rpart, spart);
+  int n = snprintf(buf, cap,
+                   "{\"t\":\"act\",\"i\":\"%s\",\"k\":\"%s\"%s%s%s}\n",
+                   pane, action, rpart, cpart, spart);
   if (n < 0 || (size_t)n >= cap) return 0;
   return (size_t)n;
 }

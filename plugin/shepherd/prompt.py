@@ -161,6 +161,28 @@ class PromptOption:
     def is_no(self) -> bool:
         return self.normalized == "no" or self.normalized.startswith("no,")
 
+    @property
+    def kind(self) -> str:
+        """One character, for the device to colour by.
+
+        The classification lives here and travels on the wire rather than
+        being re-derived on the device, because "which of these Yeses widens
+        a permission forever" is exactly the judgement that must not exist in
+        two implementations that can disagree.
+
+            s  safe      plain Yes, this once
+            w  widening  a qualified Yes: a glob grant, an auto-mode switch
+            n  no        declines
+            o  other     anything this parser does not recognise
+        """
+        if self.is_plain_yes:
+            return "s"
+        if self.is_qualified_yes:
+            return "w"
+        if self.is_no:
+            return "n"
+        return "o"
+
 
 @dataclass(frozen=True, slots=True)
 class Prompt:
@@ -277,6 +299,47 @@ def _block_at(lines: list[str], anchor: int) -> "Prompt | None":
 def plan_deny() -> list[str]:
     """Keys that cancel. Same on every prompt shape, so no parsing needed."""
     return list(DENY_KEYS)
+
+
+def plan_choice(prompt: Prompt, index: int, shown_label: str) -> list[str]:
+    """Keys that select one specific option, chosen by a human.
+
+    The counterpart to plan_approve, which picks the only option it considers
+    safe and refuses otherwise. This one will select a "Yes, and don't ask
+    again" — because the person holding the device asked for it — so the
+    checks here are about making sure the option selected is the option they
+    were looking at, not about whether it is a wise one.
+
+    Two independent guards, because an off-by-one here grants a permanent
+    permission on a work repo:
+
+    * the index must be in range for the prompt as it reads NOW, and
+    * the label at that index must still match what the device displayed.
+
+    The caller has already compared a fingerprint over the whole option
+    block, so this is belt and braces. It is cheap belt and braces, and the
+    thing it guards against is silent.
+    """
+    if not 0 <= index < len(prompt.options):
+        raise PromptError(
+            f"option {index} out of range; the prompt now has "
+            f"{len(prompt.options)}"
+        )
+    target = prompt.options[index]
+    if normalize(shown_label) != target.normalized:
+        raise PromptError(
+            f"option {index} reads {target.label!r} now, "
+            f"but {shown_label!r} was on screen"
+        )
+
+    cursor = prompt.cursor_index
+    if cursor is None:
+        raise PromptError("cursor position unknown; refusing to move blind")
+
+    delta = index - cursor
+    keys = ["down"] * delta if delta > 0 else ["up"] * (-delta)
+    keys.append("enter")
+    return keys
 
 
 def plan_approve(prompt: Prompt) -> list[str]:

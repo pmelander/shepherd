@@ -29,7 +29,8 @@ from .models import Agent, AgentStatus, HerdSnapshot
 # matches is a thing that genuinely happens.
 #
 # v2 added `d`, the per-agent recap.
-PROTOCOL_VERSION = 2
+# v3 added `o`/`w`, the option block, and a fifth field to the signed message.
+PROTOCOL_VERSION = 3
 
 # Display alias width. Long enough to tell Yield_PriceManager_API from
 # Yield_InitialPricing_Service, short enough for a 40-column grid.
@@ -60,6 +61,17 @@ MAX_AGENTS = 12
 # without the reader losing patience, and it keeps a full twelve-agent frame
 # inside the device's line buffer.
 RECAP_MAX = 64
+
+# The option block. Capped so one baroque prompt cannot crowd the frame, and
+# so the device can hold them in fixed buffers.
+#
+# Six is more than any Claude Code prompt observed here uses (the Bash gate
+# has four), and 40 characters keeps a label on one 240px line at the size the
+# queue screen draws. A label cut here is still selectable — unlike a cut
+# QUESTION, which makes the whole prompt unapprovable, because you cannot
+# consent to what you were not shown.
+MAX_OPTIONS = 6
+OPTION_MAX = 40
 
 _ALIAS_STRIP = re.compile(r"[^A-Za-z0-9]+")
 
@@ -133,6 +145,19 @@ def truncate_prompt(text: str) -> tuple[str, bool]:
     if len(collapsed) <= PROMPT_MAX:
         return collapsed, False
     return collapsed[: PROMPT_MAX - 1] + "…", True
+
+
+def truncate_option(label: str) -> str:
+    """One option label, short enough for the device's line.
+
+    Cut from the END, unlike a recap: an option's identity is at the front
+    ("Yes, and don't ask again for: git push --force ...") and the tail is
+    the part you can lose without losing which option it is.
+    """
+    collapsed = " ".join((label or "").split())
+    if len(collapsed) <= OPTION_MAX:
+        return collapsed
+    return collapsed[: OPTION_MAX - 3] + "..."
 
 
 def truncate_recap(text: str) -> str:
@@ -246,6 +271,7 @@ class FrameBuilder:
         self,
         snapshot: HerdSnapshot,
         prompts: Mapping[str, str] | None = None,
+        options: Mapping[str, tuple[tuple[str, str], ...]] | None = None,
     ) -> dict:
         """Build one snapshot frame.
 
@@ -256,6 +282,7 @@ class FrameBuilder:
         """
         now = self.now()
         prompts = prompts or {}
+        options = options or {}
 
         if snapshot.ok:
             agents = snapshot.agents
@@ -314,6 +341,14 @@ class FrameBuilder:
                     # Only present when true, so the common case costs nothing.
                     if cut:
                         row["x"] = True
+                    opts = options.get(a.pane_id) or ()
+                    if opts:
+                        row["o"] = [o[0] for o in opts]
+                        # One character per option, same order. The device
+                        # colours by this rather than re-deriving "which Yes
+                        # widens a permission forever" from the label, because
+                        # that judgement must not exist in two places.
+                        row["w"] = "".join(o[1] for o in opts)
             rows.append(row)
 
         frame: dict = {

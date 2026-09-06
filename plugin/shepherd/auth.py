@@ -96,31 +96,41 @@ def with_suppressed_oserror(fn):
 
 
 def canonical_message(ts: str, pane_id: str, action: str,
-                      decision_id: str | None) -> bytes:
+                      decision_id: str | None, choice: object = None) -> bytes:
     """The exact bytes both sides sign.
 
-    Pipe-separated with an empty field for an absent decision id, so `focus`
-    (no id) and a hypothetical action whose id is the empty string cannot
+    Pipe-separated with an empty field for anything absent, so `focus` (no
+    decision id) and a hypothetical action whose id is the empty string cannot
     produce the same message. Encoded UTF-8 and never locale-dependent — the
     device builds the same string with plain C, so anything clever here would
     diverge silently.
+
+    The fifth field is the chosen option index, added in v3. It has to be in
+    here rather than travelling beside the MAC: without it, an attacker who
+    captured a legitimate approve for "Yes" could change the index to the
+    "Yes, and don't ask again" beneath it and the signature would still check
+    out. Empty for every action that does not choose.
     """
-    return "|".join([ts, pane_id, action, decision_id or ""]).encode("utf-8")
+    return "|".join([
+        ts, pane_id, action, decision_id or "",
+        "" if choice is None else str(choice),
+    ]).encode("utf-8")
 
 
 def sign(secret: bytes, ts: str, pane_id: str, action: str,
-         decision_id: str | None) -> str:
-    mac = hmac.new(secret, canonical_message(ts, pane_id, action, decision_id),
-                   sha256).hexdigest()
+         decision_id: str | None, choice: object = None) -> str:
+    mac = hmac.new(
+        secret, canonical_message(ts, pane_id, action, decision_id, choice),
+        sha256).hexdigest()
     return mac[:MAC_HEX_LEN]
 
 
 def verify(secret: bytes, presented: object, ts: str, pane_id: str,
-           action: str, decision_id: str | None) -> bool:
+           action: str, decision_id: str | None, choice: object = None) -> bool:
     """Constant-time check. False for anything malformed rather than raising."""
     if not isinstance(presented, str) or len(presented) != MAC_HEX_LEN:
         return False
-    expected = sign(secret, ts, pane_id, action, decision_id)
+    expected = sign(secret, ts, pane_id, action, decision_id, choice)
     return hmac.compare_digest(expected, presented.lower())
 
 

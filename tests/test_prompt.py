@@ -15,7 +15,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugin"))
 
-from shepherd.prompt import (  # noqa: E402
+from shepherd.prompt import (
+    plan_choice,  # noqa: E402
     DENY_KEYS,
     PromptError,
     normalize,
@@ -297,3 +298,57 @@ def test_input_echo_above_the_prompt_does_not_hijack_the_anchor():
 def test_echo_alone_with_no_option_block_is_still_not_a_prompt():
     echo_only = "\n".join(WRITE_PROMPT_WITH_ECHO.splitlines()[:6])
     assert parse_prompt(echo_only) is None
+
+
+# ------------------------------------------------------- choosing by hand
+
+
+BASH4 = """
+ Do you want to proceed?
+ ❯ 1. Yes
+   2. Yes, and don't ask again for: git *
+   3. Yes, and switch to auto mode
+   4. No
+
+ Esc to cancel
+"""
+
+
+def test_the_kinds_travel_so_the_device_need_not_judge():
+    # The device colours by these and marks the widening ones. Deriving the
+    # same judgement on the device from the label would put "which of these
+    # Yeses grants a permission forever" in two places that can disagree.
+    p = parse_prompt(BASH4)
+    assert [o.kind for o in p.options] == ["s", "w", "w", "n"]
+
+
+def test_choosing_walks_the_cursor_to_the_asked_for_option():
+    p = parse_prompt(BASH4)
+    assert plan_choice(p, 0, "Yes") == ["enter"]
+    assert plan_choice(p, 1, "Yes, and don't ask again for: git *") ==         ["down", "enter"]
+    assert plan_choice(p, 3, "No") == ["down", "down", "down", "enter"]
+
+
+def test_choosing_refuses_an_index_the_prompt_no_longer_has():
+    p = parse_prompt(BASH4)
+    for bad in (-1, 4, 99):
+        with pytest.raises(PromptError):
+            plan_choice(p, bad, "Yes")
+
+
+def test_choosing_refuses_when_the_label_moved_under_it():
+    # The caller already compared a fingerprint over the whole block, so this
+    # is belt and braces - but the thing it guards is an off-by-one granting
+    # a permanent permission on a work repo, and that failure is silent.
+    p = parse_prompt(BASH4)
+    with pytest.raises(PromptError, match="on screen"):
+        plan_choice(p, 1, "No")
+    with pytest.raises(PromptError, match="on screen"):
+        plan_choice(p, 0, "Yes, and don't ask again for: git *")
+
+
+def test_choosing_tolerates_the_decoration_the_host_stripped():
+    # The device is shown a label the parser already normalised and cut. It
+    # sends that back, so the comparison has to survive the same treatment.
+    p = parse_prompt(BASH4)
+    assert plan_choice(p, 2, "yes, and switch to AUTO mode") ==         ["down", "down", "enter"]

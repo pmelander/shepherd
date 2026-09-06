@@ -47,7 +47,13 @@ from typing import Callable, Deque, Mapping
 from .auth import verify as verify_mac
 from .herdr import HerdrError, HerdrSource
 from .models import is_pane_id
-from .prompt import PromptError, parse_prompt, plan_approve, plan_deny
+from .prompt import (
+    PromptError,
+    parse_prompt,
+    plan_approve,
+    plan_choice,
+    plan_deny,
+)
 from .recap import extract_answer
 
 
@@ -85,6 +91,7 @@ class Refusal(str, enum.Enum):
     BAD_MAC = "signature did not verify"
     STALE_TS = "signed against a frame we no longer recognise"
     UNSIGNED = "no signature, and this relay requires one"
+    UNKNOWN_CHOICE = "chose an option the device was never shown"
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,6 +106,10 @@ class ActionRequest:
     # a secret refuses.
     ts: str | None = None
     mac: str | None = None
+    # Which option the human cycled to, when the prompt had more than the
+    # one the relay would pick on its own. None means "use the safe path",
+    # which is what a device that does not know about options still sends.
+    choice: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,6 +134,9 @@ class PendingDecision:
     pane_id: str
     fingerprint: str   # the question + options as rendered when the frame was built
     truncated: bool
+    # The option labels the device was shown, in order. Empty when the frame
+    # carried none, in which case only the safe path is available.
+    options: tuple[str, ...] = ()
 
 
 def parse_action(raw: object) -> ActionRequest | None:
@@ -150,8 +164,15 @@ def parse_action(raw: object) -> ActionRequest | None:
         return None
     if mac is not None and not isinstance(mac, str):
         return None
+    choice = raw.get("c")
+    # bool is an int in Python, and `true` would sail through an isinstance
+    # check and index options[1]. Excluded explicitly.
+    if choice is not None and (isinstance(choice, bool)
+                               or not isinstance(choice, int)
+                               or not 0 <= choice < 64):
+        return None
     return ActionRequest(pane_id=pane_id, action=action, decision_id=decision_id,
-                         ts=ts, mac=mac)
+                         ts=ts, mac=mac, choice=choice)
 
 
 def fingerprint(prompt_text: str | None) -> str:
@@ -229,7 +250,7 @@ class ActionGate:
             # `focus` has, since it carries no decision id.
             return Refusal.STALE_TS
         if not verify_mac(self.secret, req.mac, req.ts, req.pane_id,
-                          req.action.value, req.decision_id):
+                          req.action.value, req.decision_id, req.choice):
             return Refusal.BAD_MAC
         return None
 
@@ -286,7 +307,19 @@ class ActionGate:
             return self._refuse(req, Refusal.PROMPT_CHANGED, restale=True)
 
         try:
-            keys = plan_approve(prompt)
+            if req.choice is None:
+                keys = plan_approve(prompt)
+            else:
+                # The human picked one. The fingerprint above already proved
+                # the option block is unchanged since it was displayed, so the
+                # index is meaningful; passing the label too means an
+                # off-by-one in either implementation is caught rather than
+                # silently granting the neighbouring option — which on this
+                # prompt is often a permanent permission.
+                if req.choice >= len(shown.options):
+                    return self._refuse(req, Refusal.UNKNOWN_CHOICE)
+                keys = plan_choice(prompt, req.choice,
+                                   shown.options[req.choice])
         except PromptError as e:
             return self._refuse(req, Refusal.UNSAFE_OPTIONS, detail=str(e))
 

@@ -39,6 +39,13 @@ static bool g_typedOut = false;   // reveal finished, or skipped by scrolling
 // pull the screen back from wherever the reader navigated to.
 static char g_lastShowable[SHEPHERD_PANE_LEN] = {0};
 
+// Which option the queue screen has highlighted, and for which pane. Keyed by
+// pane so moving to a different prompt starts at its own default rather than
+// inheriting a row number from the last one — index 3 on one prompt is not
+// the same answer as index 3 on another.
+static int g_optSel = 0;
+static char g_optPane[SHEPHERD_PANE_LEN] = {0};
+
 // Rows the list can show at once: from y=18 down to the footer rule, at 11px
 // a row. Fewer than MAX_AGENTS, so the window has to scroll.
 #define SH_LIST_ROWS 9
@@ -73,6 +80,36 @@ static const uint16_t C_WORKING = 0x3D7F;   // blue
 static const uint16_t C_STALE   = 0xF800;   // red: we cannot see
 static const uint16_t C_LOCK    = 0x7BEF;   // grey: keys are inert, not broken
 static const uint16_t C_SEL     = 0x2104;   // the selection band, and rules
+
+// The colour an option is drawn in. Widening options are marked, always,
+// because the whole risk of letting a pocket device choose freely is that
+// "Yes, and don't ask again for: git *" looks exactly like "Yes" at a glance
+// and grants a permanent permission on a work repo.
+static uint16_t optionColour(char kind) {
+  switch (kind) {
+    case SHEPHERD_OPT_SAFE:  return 0x07E0;   // green
+    case SHEPHERD_OPT_WIDEN: return 0xFB40;   // amber: this one persists
+    case SHEPHERD_OPT_NO:    return 0x8410;   // dim
+    default:                 return 0xFFFF;
+  }
+}
+
+// Keep the highlight on a real option, and reset it when the prompt changes.
+static void syncOptionCursor(const ShepherdAgent& a) {
+  if (strcmp(a.pane, g_optPane) != 0) {
+    strncpy(g_optPane, a.pane, sizeof(g_optPane) - 1);
+    g_optPane[sizeof(g_optPane) - 1] = 0;
+    // Start on the first safe option when there is one. Landing on a
+    // widening option by default would make the dangerous answer the one a
+    // hurried thumb produces.
+    g_optSel = 0;
+    for (int i = 0; i < a.optCount; i++) {
+      if (a.optKind[i] == SHEPHERD_OPT_SAFE) { g_optSel = i; break; }
+    }
+  }
+  if (g_optSel >= a.optCount) g_optSel = a.optCount > 0 ? a.optCount - 1 : 0;
+  if (g_optSel < 0) g_optSel = 0;
+}
 
 static uint16_t statusColour(const ShepherdAgent& a) {
   if (a.isBlocked()) return C_BLOCKED;
@@ -541,8 +578,28 @@ static void drawQueue(M5Canvas& spr, int W, int H, int idx) {
   spr.drawString("BLOCKED", W - 6, 18);
   spr.setTextDatum(TL_DATUM);
 
+  syncOptionCursor(a);
+
+  // The question gets fewer lines once there are options to show under it,
+  // because between the two the options are what you are choosing BETWEEN -
+  // a question you can only half-read is still answerable, an option list you
+  // can only half-see is not.
+  const int qLines = a.optCount ? 2 : 5;
   spr.setTextColor(C_TEXT, C_BG);
-  int y = drawWrapped(spr, a.question, 6, 34, 38, 5, 11);
+  int y = drawWrapped(spr, a.question, 6, 34, 38, qLines, 11);
+
+  for (int i = 0; i < a.optCount && y < H - 24; i++) {
+    const bool sel = (i == g_optSel);
+    if (sel) spr.fillRect(0, y - 1, W, 11, C_SEL);
+    spr.setTextColor(optionColour(a.optKind[i]), sel ? C_SEL : C_BG);
+    if (sel) spr.drawString(">", 1, y);
+    // A widening option is marked in the text as well as the colour: this is
+    // the one choice that outlives the prompt, and colour alone is a thin
+    // thing to hang a permanent permission on.
+    spr.drawString(a.optKind[i] == SHEPHERD_OPT_WIDEN ? "!" : " ", 8, y);
+    spr.drawString(a.options[i], 15, y);
+    y += 11;
+  }
 
   // Say why approve is off whenever it is off, not only for the truncated
   // case. An unexplained dead key reads as a broken device.
@@ -562,6 +619,8 @@ static void drawQueue(M5Canvas& spr, int W, int H, int idx) {
     spr.drawString("locked - Fn+Del to unlock", 6, H - 11);
   } else if (!canApprove) {
     spr.drawString("[n] deny  [>] next  [del] list", 6, H - 11);
+  } else if (a.optCount > 1) {
+    spr.drawString("[;/.]pick [y]send [n]no [del]list", 6, H - 11);
   } else {
     // 40 columns at 6px, so this is the whole budget. "del" earns its place:
     // without it the herd list is unreachable exactly when the device is
@@ -667,7 +726,8 @@ void shepherdUiDraw(M5Canvas& spr, int W, int H) {
 
 // ---------------------------------------------------------------- actions
 
-static void sendAct(const ShepherdAgent& a, const char* action) {
+static void sendAct(const ShepherdAgent& a, const char* action,
+                    int choice = -1) {
   // Sign against the timestamp of the frame currently on screen. The relay
   // only accepts a frame it recently sent, so a captured action stops working
   // once the herd moves on — which is the only replay protection `focus` has.
@@ -675,14 +735,15 @@ static void sendAct(const ShepherdAgent& a, const char* action) {
   char mac[SHEPHERD_MAC_LEN] = {0};
   bool signedOk = false;
   size_t mlen = shepherdCanonicalMessage(msg, sizeof(msg), g_frame.ts,
-                                         a.pane, action, a.decision);
+                                         a.pane, action, a.decision, choice);
   if (mlen) signedOk = shepherdSign(msg, mlen, mac, sizeof(mac));
 
   char buf[256];
   size_t n = signedOk
       ? shepherdBuildAct(buf, sizeof(buf), a.pane, action, a.decision,
-                         g_frame.ts, mac)
-      : shepherdBuildAct(buf, sizeof(buf), a.pane, action, a.decision);
+                         g_frame.ts, mac, choice)
+      : shepherdBuildAct(buf, sizeof(buf), a.pane, action, a.decision,
+                         nullptr, nullptr, choice);
   if (!n) { note("frame too long"); return; }
   if (!bleConnected()) { note("not connected"); return; }
   bleWrite((const uint8_t*)buf, n);
@@ -826,8 +887,16 @@ bool shepherdUiKey(HalKey k) {
         note("cannot approve - laptop");
         return true;
       }
-      sendAct(g_frame.agents[idx], "approve");
-      note("approved");
+      {
+        const ShepherdAgent& a = g_frame.agents[idx];
+        // Send the index only when there is a list to index into. Without
+        // one the relay takes its own safe path, which is what a prompt with
+        // a single obvious answer should get.
+        const int choice = a.optCount > 1 ? g_optSel : -1;
+        sendAct(a, "approve", choice);
+        note(choice >= 0 && a.optKind[choice] == SHEPHERD_OPT_WIDEN
+                 ? "sent - widens perms" : "approved");
+      }
       g_cursor = idx + 1;
       return true;
 
@@ -841,8 +910,22 @@ bool shepherdUiKey(HalKey k) {
       g_cursor = idx + 1;
       return true;
 
-    case HalKey::Right:
+    case HalKey::Up:
     case HalKey::Down: {
+      // Cycling the options, not the agents. Up/down were unbound on this
+      // screen and the agent walk lives on `>` where the footer has always
+      // said it does.
+      if (idx < 0) return false;
+      const ShepherdAgent& a = g_frame.agents[idx];
+      if (a.optCount <= 1) return true;
+      syncOptionCursor(a);
+      g_optSel = (g_optSel + (k == HalKey::Down ? 1 : a.optCount - 1))
+                 % a.optCount;
+      return true;
+    }
+
+    case HalKey::Right:
+    case HalKey::Left: {
       int next = g_frame.firstShowable(idx + 1);
       g_cursor = (next >= 0) ? next : 0;
       return true;

@@ -117,20 +117,36 @@ def test_canonical_message_shape():
     # made greppable across both suites rather than left to inspection.
     assert canonical_message("2026-09-05T12:30:00Z", "w9:p1", "approve",
                              "abc123") == \
-        b"2026-09-05T12:30:00Z|w9:p1|approve|abc123"
+        b"2026-09-05T12:30:00Z|w9:p1|approve|abc123|"
+    # The fifth field is the chosen option index, added in v3. It is signed
+    # rather than sent beside the MAC, so a captured approve for "Yes" cannot
+    # have its index bumped to the "Yes, and don't ask again" underneath it.
+    assert canonical_message("2026-09-05T12:30:00Z", "w9:p1", "approve",
+                             "abc123", 2) == \
+        b"2026-09-05T12:30:00Z|w9:p1|approve|abc123|2"
 
 
 def test_absent_decision_id_is_an_empty_field_not_a_missing_one():
     # focus carries no decision id. Dropping the field instead of emptying it
     # would let focus|<nothing> collide with a different action's message.
     assert canonical_message(TS, "w9:p1", "focus", None) == \
-        f"{TS}|w9:p1|focus|".encode("utf-8")
+        f"{TS}|w9:p1|focus||".encode("utf-8")
+    # Same for the choice: absent and "chose option 0" must be different, or
+    # an approve that picked the first option could collide with one that
+    # picked nothing at all.
+    assert canonical_message(TS, "w9:p1", "approve", "a", None) != \
+        canonical_message(TS, "w9:p1", "approve", "a", 0)
     assert canonical_message(TS, "w9:p1", "focus", None) == \
         canonical_message(TS, "w9:p1", "focus", "")
 
 
 def test_every_field_is_bound():
     base = sign(SECRET, TS, "w9:p1", "approve", "abc123")
+    # Choosing option 1 and choosing option 2 must not share a signature.
+    assert base != sign(SECRET, TS, "w9:p1", "approve", "abc123", 0)
+    one = sign(SECRET, TS, "w9:p1", "approve", "abc123", 1)
+    two = sign(SECRET, TS, "w9:p1", "approve", "abc123", 2)
+    assert one != two
     assert base != sign(SECRET, "2026-09-05T12:30:01Z", "w9:p1", "approve", "abc123")
     assert base != sign(SECRET, TS, "w2:p1", "approve", "abc123")
     assert base != sign(SECRET, TS, "w9:p1", "deny", "abc123")
@@ -270,3 +286,94 @@ def test_parse_action_carries_the_signature_fields():
     for bad in ({"t": "act", "i": "w9:p1", "k": "deny", "ts": 5},
                 {"t": "act", "i": "w9:p1", "k": "deny", "mac": []}):
         assert parse_action(bad) is None
+
+
+# ------------------------------------------------- choosing an option
+
+
+BASH4 = """
+ Do you want to proceed?
+ ❯ 1. Yes
+   2. Yes, and don't ask again for: git *
+   3. No
+
+ Esc to cancel
+"""
+OPTS = ("Yes", "Yes, and don't ask again for: git *", "No")
+
+
+def gate4(tmp_path, src, ts=TS, decision="abc123"):
+    g = ActionGate(source=src, audit=tmp_path / "a.jsonl", secret=SECRET)
+    g.observe_frame(
+        frozenset({"w9:p1"}),
+        {decision: PendingDecision("w9:p1", fingerprint(BASH4), False, OPTS)},
+        ts=ts,
+    )
+    return g
+
+
+def chose(index, pane="w9:p1", decision="abc123", ts=TS, secret=SECRET):
+    return ActionRequest(pane_id=pane, action=Action.APPROVE,
+                         decision_id=decision, ts=ts, choice=index,
+                         mac=sign(secret, ts, pane, "approve", decision, index))
+
+
+def test_a_chosen_option_is_selected_by_walking_the_cursor(tmp_path):
+    src = FakeSource(BASH4)
+    g = gate4(tmp_path, src)
+    assert run(g.dispatch(chose(1))).ok
+    assert src.sent == [("w9:p1", ["down", "enter"])]
+
+
+def test_the_choice_is_covered_by_the_signature(tmp_path):
+    # Sign for option 0, present option 1. Without the choice inside the
+    # signed message this would go through and grant a permanent permission.
+    src = FakeSource(BASH4)
+    g = gate4(tmp_path, src)
+    forged = ActionRequest(
+        pane_id="w9:p1", action=Action.APPROVE, decision_id="abc123", ts=TS,
+        choice=1, mac=sign(SECRET, TS, "w9:p1", "approve", "abc123", 0))
+    res = run(g.dispatch(forged))
+    assert not res.ok and Refusal.BAD_MAC.value in res.reason
+    assert src.sent == []
+
+
+def test_an_option_the_device_was_never_shown_is_refused(tmp_path):
+    src = FakeSource(BASH4)
+    g = gate4(tmp_path, src)
+    res = run(g.dispatch(chose(5)))
+    assert not res.ok and Refusal.UNKNOWN_CHOICE.value in res.reason
+    assert src.sent == []
+
+
+def test_a_prompt_that_changed_underneath_refuses_the_choice(tmp_path):
+    # The fingerprint guard, reached through the choice path: the human
+    # picked option 1 of a list that is no longer the list on the pane.
+    src = FakeSource(BASH4)
+    g = gate4(tmp_path, src)
+    src.pane_text = BASH_PROMPT
+    res = run(g.dispatch(chose(1)))
+    assert not res.ok and Refusal.PROMPT_CHANGED.value in res.reason
+    assert src.sent == []
+
+
+def test_no_choice_still_takes_the_safe_path(tmp_path):
+    # A device that sends no index gets the relay's own judgement, which
+    # picks the plain Yes and refuses to guess between qualified ones.
+    src = FakeSource(BASH4)
+    g = gate4(tmp_path, src)
+    assert run(g.dispatch(signed())).ok
+    assert src.sent == [("w9:p1", ["enter"])]
+
+
+def test_parse_action_reads_the_choice_and_rejects_nonsense():
+    req = parse_action({"t": "act", "i": "w9:p1", "k": "approve",
+                        "r": "abc123", "c": 2})
+    assert req is not None and req.choice == 2
+
+    for bad in (True, False, "1", 1.5, -1, 999, None if False else []):
+        assert parse_action({"t": "act", "i": "w9:p1", "k": "approve",
+                             "r": "abc123", "c": bad}) is None, bad
+    # Absent is fine and means "no choice".
+    assert parse_action({"t": "act", "i": "w9:p1", "k": "approve",
+                         "r": "abc123"}).choice is None

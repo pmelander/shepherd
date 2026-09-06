@@ -41,7 +41,7 @@ from .auth import (
     verify_ack,
 )
 from .events import EventStreamError, PipeEventSource
-from .frame import FrameBuilder, iso, utcnow
+from .frame import MAX_OPTIONS, FrameBuilder, iso, truncate_option, utcnow
 from .herdr import CliHerdrSource, HerdrSource
 from .models import AgentStatus, HerdSnapshot
 from .prompt import parse_prompt
@@ -212,12 +212,21 @@ class Runner:
         # the buffer contains a live token counter: the id is hashed from this
         # text, so a stable question has to mean stable bytes.
         display: dict[str, str] = {}
+        options: dict[str, tuple[tuple[str, str], ...]] = {}
         for pane_id, text in raw.items():
             parsed = parse_prompt(text)
             if parsed and parsed.question:
                 display[pane_id] = parsed.question
+                # Labels and their risk classification, in screen order. The
+                # device cycles these and sends back an index; the gate
+                # re-derives the same list at send time and refuses if it has
+                # changed, so the index can only ever mean what was displayed.
+                options[pane_id] = tuple(
+                    (truncate_option(o.label), o.kind)
+                    for o in parsed.options[:MAX_OPTIONS]
+                )
 
-        frame = self.builder.build(self._snapshot, display)
+        frame = self.builder.build(self._snapshot, display, options)
         pending: dict[str, PendingDecision] = {}
         for row in frame.get("a", []):
             decision = row.get("r")
@@ -233,6 +242,7 @@ class Runner:
                 pane_id=row["i"],
                 fingerprint=fingerprint(full),
                 truncated=bool(row.get("x")),
+                options=tuple(row.get("o") or ()),
             )
         return frame, pending
 
