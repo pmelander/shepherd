@@ -231,6 +231,60 @@ the option of showing the same sentence later without a keypress.
   potter. Bruno ignores `o`, `w`, `r` and `x` — the fields that exist only so a
   device can act.
 
+### The voice
+
+Bruno is a sheep, which settles what he sounds like. Added after approval; the
+numbers below are read off the real file and the real library, not estimated.
+
+**The asset:** `firmware/assets/bruno/baa.wav`, 63.8KB.
+
+```
+codec PCM   mono   16000 Hz   16-bit
+data  65280 bytes  ->  2.04 s
+```
+
+That is the whole 64KB budget spent on one good bleat rather than three
+mediocre ones, which is the right way round.
+
+**No MP3, and no decoder.** M5Unified is already a dependency and its
+`Speaker_Class` exposes `playRaw` (int8/uint8/int16 overloads) and `playWav`,
+and has no MP3 path at all. Adding one would mean ESP8266Audio or libhelix,
+tens of KB of RAM, and decode CPU competing with the animation, to save about
+32KB on a two-second sound. So:
+
+```cpp
+M5.Speaker.playWav(baa_wav, sizeof(baa_wav));
+```
+
+**The file has a `LIST` chunk between `fmt ` and `data`, and that is fine** —
+worth recording because it is exactly the sort of thing that plays 26 bytes of
+metadata as a burst of noise on a lazier parser. `playWav` walks the
+sub-chunks and is bounded by the RIFF size:
+
+```c
+while(memcmp(sub->identifier, "data", 4) && (uint8_t*)sub < wav_data + wav->chunk_size + 8)
+    sub = (sub_chunk_t*)((uint8_t*)sub + offsetof(sub_chunk_t, data) + sub->chunk_size);
+```
+
+It also clamps the length to the data chunk, so passing `sizeof(array)` plays
+exactly 65280 bytes and not the header.
+
+**In flash as a `const` array, not on LittleFS.** The obvious alternative is a
+filesystem upload, and this project has a live argument against it: the
+Cardputer's LittleFS is corrupt right now (`Corrupted dir pair at {0x1,0x0}`,
+mount fails, the buddy falls back to ASCII), which is precisely how the GIF
+characters stopped loading. A const array in the app partition cannot be
+corrupted by a filesystem that will not mount. The cost is a ~390KB generated
+header from `xxd -i`, which is ugly in a diff and cheap at compile time.
+
+**Volume is already handled.** `SFX_VOLUME` sets `M5.Speaker.setVolume`, which
+governs `playWav` as well as the tone sequences, so the halving done for
+Shepherd applies to Bruno without a second knob.
+
+**Not yet done:** the generated header, because it belongs with the `bruno-core`
+env that does not exist yet. The asset is in the repo so the sound is settled
+before the board arrives.
+
 ## Open Questions
 
 1. **How does Bruno stop celebrating?** Shepherd clears attention on a
