@@ -416,3 +416,85 @@ def test_watchdog_is_a_noop_without_supervision(monkeypatch):
     r, _, _ = make(FakeSource())
     run(watch_herdr(r, interval=0.01))
     assert not r._stop, "running outside Herdr must not self-terminate"
+
+
+# ------------------------------------------- outliving your own Herdr
+
+
+def test_an_unreadable_stamp_does_not_disarm_the_watchdog(monkeypatch, tmp_path):
+    """The two-day orphan.
+
+    The relay is started BY Herdr, so racing Herdr's own write of the socket
+    stamp is normal. The old code read the stamp once, got None, concluded
+    "nobody is supervising me" and never looked again — so when that Herdr
+    session ended the relay stayed up, held the single BLE link, and reported
+    every agent as unknown. The device showed all-red for two days.
+    """
+    from shepherd.runner import watch_herdr
+
+    sock = tmp_path / "herdr.sock"          # deliberately does NOT exist yet
+    monkeypatch.setenv("HERDR_SOCKET_PATH", str(sock))
+    r, _, _ = make(FakeSource())
+    ticks = {"n": 0}
+
+    async def sleep(_d):
+        ticks["n"] += 1
+        if ticks["n"] == 2:
+            sock.write_text("111:222", encoding="utf-8")   # Herdr finishes
+        if ticks["n"] == 5:
+            sock.write_text("999:888", encoding="utf-8")   # and later restarts
+        await asyncio.sleep(0)
+
+    run(watch_herdr(r, interval=0.01, sleep=sleep))
+    assert r._stop, "must have noticed the session change it waited for"
+
+
+def test_a_missing_env_var_is_still_unsupervised(monkeypatch):
+    # The other half of the distinction: started by hand, nobody to watch.
+    from shepherd.runner import watch_herdr
+
+    monkeypatch.delenv("HERDR_SOCKET_PATH", raising=False)
+    r, _, _ = make(FakeSource())
+    run(watch_herdr(r, interval=0.01))
+    assert not r._stop
+
+
+def test_a_herdr_outage_is_logged_once_and_then_gives_up():
+    # A relay whose Herdr has gone sends honest, useless frames while holding
+    # the one BLE link, so a healthy replacement cannot take over. It exits.
+    from shepherd.runner import HERDR_GONE_AFTER
+
+    src = FakeSource([HerdSnapshot(agents=(), ok=False, reason="cannot run herdr")])
+    r, clock, _ = make(src)
+
+    run(r.refresh())
+    assert r._herd_failing_since is not None
+    assert not r._stop, "one failed poll is not an outage"
+
+    clock.t += HERDR_GONE_AFTER - 1
+    run(r.refresh())
+    assert not r._stop, "still inside the grace window"
+
+    clock.t += 2
+    run(r.refresh())
+    assert r._stop, "should have given up and freed the device"
+
+
+def test_recovering_clears_the_outage():
+    from shepherd.runner import HERDR_GONE_AFTER
+
+    ok = HerdSnapshot(agents=(agent(),))
+    bad = HerdSnapshot(agents=(), ok=False, reason="cannot run herdr")
+    src = FakeSource([bad])
+    r, clock, _ = make(src)
+
+    run(r.refresh())
+    assert r._herd_failing_since is not None
+
+    src.snapshots = [ok]
+    run(r.refresh())
+    assert r._herd_failing_since is None
+    # And the clock having moved past the limit must not then trip it.
+    clock.t += HERDR_GONE_AFTER * 2
+    run(r.refresh())
+    assert not r._stop

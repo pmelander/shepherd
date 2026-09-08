@@ -50,6 +50,17 @@ from .transport import BleTransport, Transport, TransportError, backoff_delays
 log = logging.getLogger("shepherd")
 
 
+def herdr_supervised() -> bool:
+    """Whether this process was started by Herdr at all.
+
+    Distinct from herdr_liveness() returning None, and the distinction is the
+    whole point: "nobody is supervising me" and "I could not read the stamp
+    just now" are different facts, and conflating them left a relay running
+    unsupervised for two days.
+    """
+    return bool(os.environ.get("HERDR_SOCKET_PATH"))
+
+
 def herdr_liveness() -> str | None:
     """Herdr's own liveness stamp, or None when it is gone.
 
@@ -76,10 +87,26 @@ async def watch_herdr(runner: "Runner", interval: float = 5.0,
     afterwards. Without this, every Herdr restart would leave another orphan
     competing for the same Cardputer, and the newest one would lose.
     """
-    initial = herdr_liveness()
-    if initial is None:
-        log.debug("no HERDR_SOCKET_PATH; running unsupervised")
+    if not herdr_supervised():
+        # Genuinely nobody to watch: started by hand. Logged at INFO, not
+        # DEBUG, because "am I supervised" is the first question when a relay
+        # turns out to have outlived its session.
+        log.info("no HERDR_SOCKET_PATH; running unsupervised")
         return
+
+    # The stamp can be missing for a moment while Herdr writes it — the relay
+    # is started BY Herdr, so racing its own startup is normal. Waiting is
+    # right here; disarming is not. Treating an unreadable stamp as "not
+    # supervised" is what produced a relay that outlived its Herdr by two
+    # days, holding the BLE link and reporting every agent as unknown.
+    initial = herdr_liveness()
+    while initial is None and not runner._stop:
+        await sleep(interval)
+        initial = herdr_liveness()
+    if runner._stop:
+        return
+    log.info("supervising herdr session %s", initial)
+
     while not runner._stop:
         await sleep(interval)
         current = herdr_liveness()
@@ -103,6 +130,18 @@ KEEPALIVE = 10.0
 # How often the loop wakes to check whether anything moved. Cheap: it is a
 # comparison against cached state, not a Herdr call.
 TICK = 1.0
+
+# How long Herdr may be unreachable before the relay gives up and exits.
+#
+# Belt and braces beside the watchdog above, and it does not depend on any
+# environment plumbing being right. A relay whose Herdr has gone reports every
+# agent as unknown — an honest frame, and a useless one — while still holding
+# the single BLE link, so a healthy replacement cannot take over. Exiting
+# frees the radio and the lock.
+#
+# Generous on purpose: a CLI that times out under load must not cost a working
+# relay. Only a session that is actually gone stays gone for five minutes.
+HERDR_GONE_AFTER = 300.0
 
 # Rotation is asked for by dropping this file in the state directory, which
 # `start.py --rotate-key` does. A file rather than a socket or a signal
@@ -142,6 +181,7 @@ class Runner:
     _prompts: dict[str, tuple[int, str]] = field(default_factory=dict, init=False)
     _dirty: bool = field(default=True, init=False)
     _stop: bool = field(default=False, init=False)
+    _herd_failing_since: float | None = field(default=None, init=False)
     # Set while a rotation is in flight; the action loop hands the ack here
     # rather than trying to interpret it, because only the push loop knows
     # which new key it is waiting to hear about.
@@ -153,6 +193,23 @@ class Runner:
     async def refresh(self) -> None:
         """Ask Herdr who is out there and what they are doing."""
         snap = await self.source.list_agents()
+        if snap.ok and self._herd_failing_since is not None:
+            log.info("herdr is reachable again")
+            self._herd_failing_since = None
+        elif not snap.ok:
+            # Logged once per outage, not once per poll. Until this existed a
+            # device could show every agent red for days with the relay log
+            # saying nothing whatsoever about why.
+            now = self.clock()
+            if self._herd_failing_since is None:
+                self._herd_failing_since = now
+                log.warning("herdr unreachable (%s); agents will show unknown",
+                            snap.reason)
+            elif now - self._herd_failing_since >= HERDR_GONE_AFTER:
+                log.error("herdr unreachable for %.0fs; exiting so a relay "
+                          "that can see it may take the device",
+                          now - self._herd_failing_since)
+                self.stop()
         if not snap.ok:
             # Keep the previous membership so the frame builder can name the
             # agents it is marking unknown, but flag the frame as dirty so the
