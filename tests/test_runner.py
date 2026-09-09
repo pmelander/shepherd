@@ -350,6 +350,105 @@ def test_a_transport_that_never_connects_does_not_stop_the_herd_loop():
     assert r._latest is not None, "a dead radio stopped frames being built"
 
 
+def test_frames_are_published_with_no_device_connected(tmp_path):
+    # The two halves of the split, together: the herd loop builds without a
+    # transport, and the tee publishes what it builds. This is the behaviour
+    # Bruno actually depends on.
+    from shepherd.publish import STREAM_NAME, FramePublisher
+
+    src = FakeSource([HerdSnapshot(agents=(agent(seq=1),))])
+    publisher = FramePublisher(path=tmp_path / STREAM_NAME)
+    r, clock, _ = make(src, tick=1.0, keepalive=10.0, poll_interval=30.0,
+                       require_signatures=False, publisher=publisher)
+
+    run(_spin(r._herd_loop()))
+
+    written = publisher.path.read_text(encoding="utf-8").splitlines()
+    assert written, "nothing was published"
+    first = json.loads(written[0])
+    assert first["t"] == "snap"
+    assert [row["i"] for row in first["a"]] == ["w2:p1"]
+
+
+def test_what_is_published_is_byte_identical_to_what_the_device_is_sent(tmp_path):
+    from shepherd.publish import STREAM_NAME, FramePublisher
+
+    src = FakeSource([HerdSnapshot(agents=(agent(seq=1),))])
+    t = FakeTransport()
+    publisher = FramePublisher(path=tmp_path / STREAM_NAME)
+    r, clock, _ = make(src, transport=t, tick=1.0, keepalive=10.0,
+                       poll_interval=30.0, require_signatures=False,
+                       publisher=publisher)
+    gate = _Gate()
+
+    run(_spin(r._herd_loop(), r._push_loop(t, gate)))
+
+    sent = b"".join(t.sent)
+    published = publisher.path.read_bytes()
+    # The device may be a frame behind, since the push loop sends on its own
+    # tick, so the published stream must START with what was sent.
+    assert sent, "nothing was sent"
+    assert published.startswith(sent), (
+        "the stream diverged from what the device received"
+    )
+
+
+def test_a_publisher_that_explodes_does_not_stop_the_relay(tmp_path, caplog):
+    # The tee is additive. If it fails, the device must carry on exactly as
+    # before - that is the whole reason it is a tee and not a fan-out.
+    class Exploding:
+        def __init__(self):
+            self.calls = 0
+
+        def publish(self, frame, payload):
+            self.calls += 1
+            raise RuntimeError("disk on fire")
+
+    src = FakeSource([HerdSnapshot(agents=(agent(seq=1),))])
+    t = FakeTransport()
+    boom = Exploding()
+    r, clock, _ = make(src, transport=t, tick=1.0, keepalive=10.0,
+                       poll_interval=30.0, require_signatures=False,
+                       publisher=boom)
+    gate = _Gate()
+
+    with caplog.at_level("WARNING", logger="shepherd"):
+        run(_spin(r._herd_loop(), r._push_loop(t, gate)))
+
+    assert boom.calls >= 1, "the publisher was never called"
+    assert len(t.sent) >= 1, "a broken tee stopped the device being served"
+    warnings = [r for r in caplog.records
+                if r.levelname == "WARNING" and "publisher raised" in r.getMessage()]
+    assert len(warnings) == 1, (
+        f"one line per outage, not one per frame (got {len(warnings)} for "
+        f"{boom.calls} calls)"
+    )
+
+
+def test_the_publisher_never_sees_a_rekey_frame(tmp_path):
+    # Structural, not a matter of the allowlist doing its job: the rekey frame
+    # is sent from _rotate() on the transport path and the tee only ever sees
+    # what the herd loop builds. Both guards exist; this pins the outer one.
+    from shepherd.publish import STREAM_NAME, FramePublisher
+
+    seen: list[str] = []
+
+    class Watching(FramePublisher):
+        def publish(self, frame, payload):
+            seen.append(frame.get("t"))
+            return super().publish(frame, payload)
+
+    src = FakeSource([HerdSnapshot(agents=(agent(seq=1),))])
+    r, clock, _ = make(src, tick=1.0, keepalive=10.0, poll_interval=30.0,
+                       require_signatures=False,
+                       publisher=Watching(path=tmp_path / STREAM_NAME))
+
+    run(_spin(r._herd_loop()))
+
+    assert seen, "the publisher was never called"
+    assert set(seen) == {"snap"}, f"the tee saw more than snapshots: {set(seen)}"
+
+
 def test_the_push_loop_does_not_poll_the_herd_itself():
     # The inverse of the separation, and the assertion that would fail if
     # anyone moved polling back into the connect/serve path. Run the push loop

@@ -66,6 +66,7 @@ from .frame import MAX_OPTIONS, FrameBuilder, iso, truncate_option, utcnow
 from .herdr import CliHerdrSource, HerdrSource
 from .models import AgentStatus, HerdSnapshot
 from .prompt import parse_prompt
+from .publish import FramePublisher
 from .transport import BleTransport, Transport, TransportError, backoff_delays
 
 log = logging.getLogger("shepherd")
@@ -203,6 +204,12 @@ class Runner:
     source: HerdrSource = field(default_factory=CliHerdrSource)
     transport_factory: Callable[[], Transport] = BleTransport
     builder: FrameBuilder = field(default_factory=FrameBuilder)
+    # The frame tee. None means do not publish, which is the default so that
+    # constructing a Runner never writes to a real state directory as a side
+    # effect - the composition root (start.py) opts in. Once wired it writes
+    # unconditionally: making the tee conditional on a subscriber existing
+    # would mean a subscriber that starts late sees nothing.
+    publisher: "FramePublisher | None" = None
     poll_interval: float = POLL_INTERVAL
     keepalive: float = KEEPALIVE
     tick: float = TICK
@@ -224,6 +231,7 @@ class Runner:
     # number of another - there is no await between the reads, so a single
     # attribute load is atomic in practice and staying that way is deliberate.
     _latest: "_Built | None" = field(default=None, init=False)
+    _publish_failing: bool = field(default=False, init=False)
     _stop: bool = field(default=False, init=False)
     _herd_failing_since: float | None = field(default=None, init=False)
     # Set while a rotation is in flight; the action loop hands the ack here
@@ -414,14 +422,41 @@ class Runner:
             if self._dirty or (now - last_build) >= self.keepalive:
                 frame, pending = self.build()
                 gen += 1
+                payload = self.builder.encode(frame)
                 self._latest = _Built(
                     gen=gen,
                     frame=frame,
-                    payload=self.builder.encode(frame),
+                    payload=payload,
                     pending=pending,
                 )
                 self._dirty = False
                 last_build = now
+                # Publish here rather than beside transport.send(), for two
+                # reasons. Subscribers get frames whether or not a device is
+                # connected, which is the point of the loop split. And the
+                # publisher never sees a frame the herd loop did not build -
+                # in particular it cannot see the rekey frame, which carries
+                # the shared secret and is sent from _rotate() on the
+                # transport path. The allowlist in publish.py is the actual
+                # guard; this is defence in depth, not a substitute for it.
+                #
+                # Guarded here as well as inside the publisher, because "the
+                # tee fails alone" has to hold for ANY publisher, not only for
+                # the one that guards itself. Without this an exception in a
+                # tee kills the herd loop, which stops the polling, which
+                # stops the device being served - a subscriber's bug taking
+                # down the thing it subscribes to.
+                if self.publisher is not None:
+                    try:
+                        self.publisher.publish(frame, payload)
+                        self._publish_failing = False
+                    except Exception as e:  # noqa: BLE001 - deliberate
+                        if not self._publish_failing:
+                            log.warning(
+                                "the frame publisher raised (%s); continuing "
+                                "without it. The device is unaffected.", e
+                            )
+                            self._publish_failing = True
 
             await self.sleep(self.tick)
 

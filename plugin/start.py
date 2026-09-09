@@ -40,6 +40,7 @@ from shepherd.auth import (
 )
 from shepherd.frame import FrameBuilder, iso, utcnow
 from shepherd.herdr import CliHerdrSource, herdr_binary
+from shepherd.publish import FramePublisher
 from shepherd.runner import Runner, rotate_marker, watch_herdr
 from shepherd.singleton import AlreadyRunning, acquire
 
@@ -170,7 +171,15 @@ async def serve() -> int:
         logging.warning("not starting: %s", e)
         return 0
 
-    runner = Runner()
+    # The frame tee. Wired here rather than defaulted inside Runner, so that
+    # constructing a Runner in a test never writes to a real state directory
+    # as a side effect. Once wired it publishes unconditionally: making it
+    # conditional on a subscriber existing would mean a subscriber that starts
+    # late sees nothing at all.
+    publisher = FramePublisher()
+    logging.info("publishing frames to %s", publisher.path)
+
+    runner = Runner(publisher=publisher)
     loop = asyncio.get_running_loop()
 
     # Herdr stops plugins by signalling them. Stopping cleanly means the
