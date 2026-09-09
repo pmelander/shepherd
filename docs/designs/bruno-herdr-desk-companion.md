@@ -396,3 +396,332 @@ The goal is other Herdr users, so this is load-bearing.
   should connect by BLE"* — you reason from what the system promised rather
   than from what it did. That sentence is what found a relay that had outlived
   its Herdr by two days.
+
+---
+
+## Review revisions (/plan-eng-review, 2026-09-08)
+
+Twelve decisions. Everything below supersedes the text above it where they
+conflict. Numbers in this section were measured, not estimated: the frame
+struct was compiled, the frame sizes were built with the real `FrameBuilder`,
+and the Windows file semantics were run.
+
+1. **The tee allowlists frame types (`snap`, `said`), it does not mirror
+   `send()`.** `auth.py:181` puts the new shared secret on the wire as plain
+   hex and `runner.py:387` sends it through the same `transport.send()` every
+   other frame uses. A wrapper on `send()` would have written the HMAC secret
+   into a file the design also calls a public interface. An allowlist fails
+   closed, so a future frame type is excluded until someone deliberately adds
+   it.
+
+2. **`bruno.py` supervises itself the way the relay does**: its own singleton
+   lock via `singleton.acquire(path=...)`, `watch_herdr(...)` to exit when the
+   Herdr session ends or is replaced, and an independent backstop for a port
+   that stays unreachable. Herdr does not kill startup-hook processes, and a
+   Windows COM port is exclusive-open, so orphan number two cannot open it and
+   sits retrying while the screen goes stale. The port-file opt-in stays.
+
+3. **The distribution plumbing is fixed before Bruno code, not before
+   release.** `firmware/.github/workflows/release.yml` is a plain file in a
+   subdirectory; Actions only reads `.github/workflows/` at the repo root, and
+   `git tag` is empty, so it has never run and could not have. There is also
+   no CI for the 219 Python tests, no pytest config, and no dependency
+   manifest at all - `bleak` and `pyserial` are simply assumed. Bare `pytest`
+   at the root dies with `INTERNALERROR ... SystemExit: no stick found`.
+
+4. **The pushed done-message gets its OWN frame type, published to the stream
+   only.** Per-agent `m` is dropped: the struct was compiled, and
+   `sizeof(ShepherdFrame)` is 6604 with 1396 bytes of headroom, so `m` at
+   limit=120 costs 124 bytes per agent and lands at **8092**, tripping
+   `static_assert(sizeof(ShepherdFrame) < 8000)` - the tripwire added after a
+   boot loop. Reusing `deet` was rejected too: `shepherd_ui.cpp:175` applies a
+   detail frame unconditionally (`g_detail = d; g_scroll = 0; g_typedOut =
+   false;`), so one arriving over BLE would yank the screen mid-read. A new
+   `t` value makes Shepherd **structurally** immune - `shepherd_frame.h:276`
+   returns NOT_MINE and `data.h:80` falls through harmlessly - with no edit
+   and no reflash. Success criterion 4 holds by construction.
+
+5. **Rotation: the follower closes the file between polls and the writer
+   retries.** Rename-and-reopen was the POSIX-correct choice and it does not
+   execute here. Run against a follower holding the file open:
+   `PermissionError: [WinError 32]`, with both `open()` and `os.open()`;
+   Python exposes no FILE_SHARE_DELETE. Truncate, the rejected option, works.
+   The fix was also run: with the follower closing between polls the rename
+   succeeds, and `st_ino` on NTFS is populated, nonzero, and changes across
+   the swap - so the identity detection the design wanted works as written.
+   The writer must open per write (the `actions.py:389` precedent) or it
+   blocks its own rename.
+
+6. **One DTR/RTS-deasserted serial-open helper, and the two `firmware/tools`
+   scripts get fixed and renamed.** `test_serial.py:7` is a bare
+   `serial.Serial(port, 115200)` and `test_xfer.py:12-13` opens then sets
+   `s.dtr = True`. The repo's only two examples of opening a port both
+   contain the bug this document warns about. Renaming to `probe_*.py` also
+   stops pytest collecting them however it is invoked.
+
+7. **Bruno reuses `drawStale()` and `drawBadVersion()` and nothing else.**
+   `shepherd_ui.cpp` turned out to be resolution-agnostic already - every
+   draw function takes `(M5Canvas& spr, int W, int H)` and there are zero
+   hardcoded 240/135/320 in 991 lines - so those two render at 320x240
+   unchanged. `drawStale()` IS the NO SIGNAL rule Open Question 3 wanted
+   ported. `drawHerd()` is deliberately NOT reused: a scrollable agent list
+   is the remote genre the tamagotchi framing ruled out.
+
+8. **`_usbLine` and `_btLine` both go to 8192, not 4096.** The largest frame
+   the real `FrameBuilder` can emit - 12 agents, all blocked, six
+   max-length options each - measures **6317 bytes**. So the planned 4096
+   truncates it too, and the fix as written was 2221 bytes short of its own
+   goal. A realistic herd is fine (five agents with one blocked is 1039
+   bytes; all five blocked is 2663), which is why nobody has seen it.
+   Shepherd's BLE buffer is the same 4096, so this is a live bug in shipped
+   firmware. RAM is at 31.6% (103,684 of 327,680), so 16KB of buffers is
+   free. **`shepherd_frame.h:53-57` currently claims the 12-agent cap means
+   an over-long frame "is counted and truncated rather than overflowing."
+   That is false at 6317 into 4096 and must be corrected in the same
+   change.**
+
+9. **The follower buffers incomplete trailing bytes and emits only
+   newline-terminated lines.** The tee appends and the follower polls with no
+   coordination between them, so a torn read is normal, not exceptional.
+   Advancing the offset past a partial read, or emitting a newline of its
+   own, turns one good frame into two malformed ones that the device silently
+   drops.
+
+10. **The follower coalesces `snap` when behind, and never coalesces the
+    announcement.** At 115200 baud a 6317-byte frame is 548ms of wire time
+    (6317 x 10 / 115200). The relay can mark dirty every tick, so writes
+    queue and the queue only grows, against a success criterion of "within a
+    couple of seconds". A snapshot is idempotent state and a superseded one
+    is worthless; an announcement is an event and dropping it loses the
+    bleat.
+
+11. **`refresh()` and publication lift OUT of the BLE connect loop.** Found
+    by the outside voice, and the most important finding in the review.
+    `runner.py:311-320`: `run()` calls `transport.connect()` and only on
+    success reaches `_serve()`, which is what starts the push loop that calls
+    `refresh()`. So with the Cardputer in a drawer, out of range, or off, the
+    relay builds no frames at all and the tee has nothing to publish.
+    **Bruno, the always-on wired device, would go blank whenever the pocket
+    device is away.** The design's independence claim was inverted. The herd
+    is the relay's subject; the transport is one consumer of it.
+
+12. **Bruno gets its own `setup()`/`loop()` via `build_src_filter`, and
+    `ble_stub.cpp` is deleted from the plan.** The document's "two honest
+    options" for `main.cpp` were a false binary, as the outside voice pointed
+    out: Bruno need not compile `main.cpp` or `data.h` at all, and the 16
+    unguarded `ble*` calls live in exactly those two files. So there is no
+    third `#ifdef` branch, no HAL refactor, and no nine no-op functions to
+    maintain. The line about this dominating the firmware effort no longer
+    applies. Related correction: the document scopes board-conditional sites
+    to `main.cpp`'s 20, but there are **27** - 3 in `hal.cpp`, 2 in `hal.h`,
+    1 in `buddy.cpp`, 1 in `character.cpp`.
+
+### Still to specify before implementation
+
+Not decisions left open, but text the plan does not yet contain:
+
+- **The stream contract** (task T13): where a subscriber starts, what happens
+  on reconnect, retention, duplicate semantics, and an actual rotation cap
+  rather than "a small cap". Starting at EOF discards completions from before
+  the subscriber started, and rotating away a file with unread lines in it
+  loses them; "never coalesce announcements" is not a delivery guarantee.
+  Recommended cap unless you prefer otherwise: 2MB with one `.1` backup,
+  bounding disk at 4MB - roughly five hours of realistic history at the 10s
+  keepalive floor (about 9MB/day at realistic frame sizes).
+- **The one-bubble policy** (task T11): with five agents, ordering between
+  simultaneous completions, minimum display time, expiry, and what wins when
+  a celebration collides with an unresolved prompt. Also: a *fresh* snapshot
+  reporting `unknown` or a Herdr outage never trips transport staleness, so
+  NO SIGNAL alone does not cover it.
+- **Source-age checking** (task T12): `stale()` is `millis() -
+  g_lastFrameMs`, time since *receipt*. Flushing buffered frames after a
+  serial outage would make Bruno look current over a dead relay.
+- **Independent message fetch** (task T8): `_fetch_prompts()` reads
+  sequentially inside `refresh()` and each CLI call has a 15s timeout
+  (`herdr.py:27`), so five slow reads can stall publication about 75s.
+  Copying that pattern for messages doubles the exposure. `state_change_seq`
+  labels a cache entry; it does not make the terminal read atomic with the
+  completion, so the fetch must be able to return nothing and still let Bruno
+  celebrate.
+
+### One assumption still unverified
+
+Two `[[startup]]` entries in one `herdr-plugin.toml`. The manifest is
+documented as array-of-tables, so plural is the intended shape and this is
+probably fine - confidence 7/10, not 10, because verifying it means linking a
+probe plugin into the live Herdr hosting five work agents. Confirm it on the
+bench alongside the hardware probes. Fallback if it turns out to be
+single-only: `start.py` spawns `bruno.py` as a child when the port file
+exists.
+
+## NOT in scope
+
+Considered during review and explicitly deferred:
+
+- **Per-agent `m` on the snapshot.** Dropped for decision 4; the announcement
+  frame does the job without growing the struct on both devices.
+- **A protocol version bump.** Still correct to avoid: the device refuses an
+  unrecognised version and says so on screen, so 3 to 4 would black out the
+  Cardputer until reflashed. Additive-only remains the constraint.
+- **`ble_stub.cpp`.** Removed by decision 12 rather than deferred.
+- **The `hal.h` board-modularity refactor.** Real debt, and 7 of the 27
+  conditional sites already live outside `main.cpp`, but Bruno no longer
+  needs it. Revisit for a fourth board, not for this one.
+- **A `halPlayWav()` entry point.** `M5.Speaker.playWav` bypasses the layer
+  every other sound goes through (`halBeep`, `halBeepSeq`, `halBeepVolume`)
+  and `M5.Speaker` does not exist on the `m5stickc-plus` env. Bruno's own
+  main can call M5 directly; worth a hal function only if a second board
+  wants audio.
+- **The `platforms = ["windows"]` portability work.** Still design step 8, and
+  still required before the open-source goal is met - but not before Bruno
+  works on the desk.
+- **Preserving the event in `_event_loop()`.** Recorded in `TODOS.md`; a
+  shipped-code bug Bruno makes matter more, but not on its critical path.
+- **The corrupt Cardputer LittleFS.** Recorded in `TODOS.md`. Bruno avoids
+  the filesystem because of it, which is why it needed writing down.
+- **Named-pipe `HerdrSource`.** Already in `TODOS.md` at P3, unchanged.
+- **Raising the serial baud to 921600.** Coalescing fixes the cause at any
+  baud; the baud change would only move the ceiling, and it touches
+  Shepherd's shared `platformio.ini`.
+
+## What already exists
+
+Everything Bruno needs that is already written, and whether the plan reuses
+it:
+
+| Sub-problem | Already shipped | Reused? |
+|---|---|---|
+| Frame parsing on device | `shepherd_frame.h`, 706 test lines | Yes, unchanged |
+| Push one agent's long text | `detail_frame()` plus `ShepherdDetail` (1040B) | Shape reused, new `t` (decision 4) |
+| Extract what an agent said | `recap.py` `extract_answer` / `truncate_body(text, limit)` | Yes, limit is already a parameter |
+| Cache a per-agent fetch on `state_change_seq` | `_fetch_prompts()` plus the pop on state exit | Pattern reused, made independent (T8) |
+| Staleness screen | `drawStale(spr, W, H)` - IS the NO SIGNAL rule | Yes (decision 7) |
+| Version refusal screen | `drawBadVersion(spr, W, H)` | Yes (decision 7) |
+| Daemon singleton | `singleton.acquire(path=..., wait=...)` | Yes, already parameterized |
+| Session watchdog | `watch_herdr(runner)` at `start.py:187` | Yes, duck-typed on `.stop()` |
+| Guarded append to a state file | `actions.py:389`, open("a", encoding="utf-8") plus broad except | Yes, the tee's precedent |
+| Single flashable image | `merge_bin.py`, generic on `$PIOENV` | Yes, free for a new env |
+| Line reassembly | `_LineBuf` in `data.h` | Extracted to `line_buf.h` (T3) |
+| Per-env source selection | `build_src_filter` | Yes, and it replaces `ble_stub.cpp` |
+
+Rebuilt rather than reused: nothing, after decision 12 removed
+`ble_stub.cpp`. The one genuine duplication left is Bruno's own display and
+power bring-up, which its separate `setup()` must do because it no longer
+compiles `main.cpp`.
+
+## Implementation Tasks
+
+Synthesized from this review's findings. Each task derives from a specific
+finding above. Run with Claude Code or Codex; checkbox as you ship.
+
+- [ ] **T1 (P1, human: ~4h / CC: ~30min)** - relay/publish - Add the frame tee with a `snap`/`said` allowlist, explicit utf-8, and a guarded write
+  - Surfaced by: Architecture - `rekey_frame` carries the secret as plaintext hex (`auth.py:181`), sent via `transport.send` (`runner.py:387`)
+  - Files: `plugin/shepherd/publish.py`, `plugin/shepherd/runner.py`, `tests/test_publish.py`
+  - Verify: `pytest tests/test_publish.py`, then rotate the key live and grep `frames.ndjson` for the secret
+- [ ] **T2 (P1, human: ~1d / CC: ~45min)** - relay/runner - Lift `refresh()` and publication out of the BLE connect loop
+  - Surfaced by: Outside voice 1 - `refresh` runs only inside `_serve`, reached only after `transport.connect()` succeeds (`runner.py:311-320`)
+  - Files: `plugin/shepherd/runner.py`, `tests/test_runner.py`
+  - Verify: `pytest tests/` stays at 219; frames appear in `frames.ndjson` with no device connected
+- [ ] **T3 (P1, human: ~4h / CC: ~30min)** - firmware/line_buf - Extract `_LineBuf` to a dependency-free header, both buffers to 8192, native tests
+  - Surfaced by: Test review REGRESSION (IRON RULE) - worst-case frame measured 6317 bytes; 1024 and 4096 both truncate; untestable inside `data.h`
+  - Files: `firmware/src/line_buf.h`, `firmware/src/data.h`, `firmware/test/test_line_buf/test_main.cpp`, `firmware/src/shepherd_frame.h`
+  - Verify: `pio test -e native` (68 to 74+), and the false comment at `shepherd_frame.h:53-57` corrected
+- [ ] **T4 (P1, human: ~1h / CC: ~10min)** - relay/bruno - Singleton lock, `watch_herdr` watchdog, unreachable backstop for `bruno.py`
+  - Surfaced by: Architecture plus prior learning `herdr-plugin-startup-hooks-orphan` - startup processes orphan; a COM port is exclusive-open
+  - Files: `plugin/bruno.py`, `tests/test_bruno.py`
+  - Verify: start two by hand (second exits 0 with a reason); restart a Herdr session and confirm exactly one process remains
+- [ ] **T5 (P1, human: ~4h / CC: ~30min)** - relay/bruno - The follower: open-seek-read-close, `st_ino` swap detect, partial-line buffering, coalesce `snap` only
+  - Surfaced by: Code quality (WinError 32 proven) plus test review (torn reads) plus performance (548ms per worst-case frame)
+  - Files: `plugin/bruno.py`, `tests/test_bruno.py`
+  - Verify: hand-written frames file with a deliberately truncated tail; rotate mid-read; append faster than the wire drains
+- [ ] **T6 (P1, human: ~4h / CC: ~30min)** - infra/ci - Workflow to the repo root, pytest CI job, `testpaths`, dependency manifest
+  - Surfaced by: Architecture plus outside voice 8 - `firmware/.github` is never read by Actions, zero tags, no test CI, no declared dependencies
+  - Files: `.github/workflows/release.yml`, `pyproject.toml`, `plugin/requirements.txt`
+  - Verify: bare `pytest` at the root gives 219 passed; push a throwaway tag and watch the release job actually fire
+- [ ] **T7 (P2, human: ~2h / CC: ~15min)** - relay/serialport - One DTR/RTS-deasserted open helper; fix and rename both tools
+  - Surfaced by: Code quality - `tools/test_serial.py:7` and `test_xfer.py:12-13` both contain the auto-reset bug and both crash root pytest
+  - Files: `plugin/shepherd/serialport.py`, `firmware/tools/probe_serial.py`, `firmware/tools/probe_xfer.py`, `tests/test_serialport.py`
+  - Verify: open the port and confirm device uptime keeps climbing rather than resetting to about 15s
+- [ ] **T8 (P2, human: ~4h / CC: ~30min)** - relay/runner - Done-message fetch independent of `refresh`, cached, popped, and optional
+  - Surfaced by: Scope call plus outside voice 3 - five sequential 15s reads (`herdr.py:27`) can stall publication about 75s, and the read is not atomic with the completion
+  - Files: `plugin/shepherd/runner.py`, `plugin/shepherd/frame.py`, `tests/test_runner.py`
+  - Verify: tests for the cache hit, the pop on leaving `done`, the pop on a vanished pane, and a celebration with no text
+- [ ] **T9 (P2, human: ~2h / CC: ~15min)** - firmware/bruno - Bruno-only parser for the announcement frame, with native tests
+  - Surfaced by: Decision 4 - a distinct `t` makes Shepherd structurally immune (`shepherd_frame.h:276` returns NOT_MINE)
+  - Files: `firmware/src/bruno_frame.h`, `firmware/test/test_bruno_frame/test_main.cpp`
+  - Verify: `pio test -e native`; assert an oversized body is clamped, not overflowed
+- [ ] **T10 (P2, human: ~1d / CC: ~45min)** - firmware/bruno - Bruno's own `setup()`/`loop()` via `build_src_filter`; do not compile `main.cpp` or `data.h`
+  - Surfaced by: Cross-model tension resolved - the third-branch-vs-hal binary was false; the 16 unguarded `ble*` calls live in files Bruno need not compile
+  - Files: `firmware/platformio.ini`, `firmware/src/bruno_main.cpp`
+  - Verify: `pio run -e bruno-core` links with no `ble_stub.cpp` present, and `pio run -e cardputer-adv` is unchanged
+- [ ] **T11 (P2, human: ~1d / CC: ~45min)** - firmware/bruno - `bruno_ui.cpp`: avatar and bubble, reusing `drawStale`/`drawBadVersion`, with a stated one-bubble policy
+  - Surfaced by: Decision 7 plus outside voice 6 - `shepherd_ui` is already resolution-agnostic, but one bubble has no ordering, minimum display time or expiry
+  - Files: `firmware/src/bruno_ui.cpp`
+  - Verify: on the bench, two simultaneous completions and a celebration colliding with a blocked prompt
+- [ ] **T12 (P2, human: ~2h / CC: ~15min)** - relay/bruno - Check source age before delivery so replayed frames cannot restore health
+  - Surfaced by: Outside voice 5 - `stale()` measures time since receipt (`shepherd_ui.cpp:132`)
+  - Files: `plugin/bruno.py`, `tests/test_bruno.py`
+  - Verify: kill the relay, unplug and replug the board, confirm Bruno shows NO SIGNAL rather than a contented sheep
+- [ ] **T13 (P2, human: ~2h / CC: ~15min)** - docs/design - Specify the stream contract and a real rotation cap
+  - Surfaced by: Outside voice 4 - starting at EOF drops pre-startup completions; rotation drops unread lines; "a small cap" is not a number
+  - Files: `docs/designs/bruno-herdr-desk-companion.md`
+  - Verify: a reader can implement a third-party subscriber from the document alone
+- [ ] **T14 (P3, human: ~1h / CC: ~10min)** - docs/design - Correct the doc and the false code comment
+  - Surfaced by: Code quality - `shepherd_frame.h:53-57` promises an over-long frame is truncated rather than overflowing, false at 6317 into 4096; and 27 board-conditional sites, not 20
+  - Files: `docs/designs/bruno-herdr-desk-companion.md`, `firmware/src/shepherd_frame.h`
+  - Verify: every checkable number in the document matches a command someone can re-run
+
+### Worktree parallelization
+
+| Step | Modules touched | Depends on |
+|------|----------------|------------|
+| T2, T1, T8 | `plugin/shepherd/` (runner, publish, frame) | T2 before T1 before T8 |
+| T7, T4, T5, T12 | `plugin/bruno.py`, `plugin/shepherd/serialport.py`, `firmware/tools/` | T7 before T5; T1 for live testing only |
+| T3, T10, T9, T11 | `firmware/src/`, `firmware/platformio.ini`, `firmware/test/` | T3 before T10 before T11 |
+| T6 | `.github/`, `pyproject.toml`, `plugin/requirements.txt` | - |
+| T13, T14 | `docs/designs/`, `firmware/src/shepherd_frame.h` | - |
+
+```
+Lane A: T2 -> T1 -> T8         (sequential, shared plugin/shepherd/runner.py)
+Lane B: T7 -> T4 -> T5 -> T12  (sequential, shared plugin/bruno.py)
+Lane C: T3 -> T10 -> T9 -> T11 (sequential, shared firmware/src/)
+Lane D: T6                     (independent)
+Lane E: T13 -> T14             (sequential, shared design doc)
+```
+
+Execution order: launch **A, C, D, E in parallel**. Lane B starts in parallel
+too, developed against a hand-written frames file exactly as design step 4
+prescribes, and only needs Lane A merged for live verification.
+
+Conflict flags:
+
+- **Lanes C and E both touch `firmware/src/shepherd_frame.h`** - T3 raises the
+  buffer constants, T14 corrects the false comment at `shepherd_frame.h:53-57`.
+  Same file, adjacent lines. Do them in one lane or coordinate deliberately.
+- **Lanes A and B both live under `plugin/`** but touch disjoint files
+  (`runner.py`/`publish.py`/`frame.py` versus `bruno.py`/`serialport.py`). Low
+  risk, but T5 imports T7's helper, so B's internal order matters.
+
+## GSTACK REVIEW REPORT
+
+| Review | Trigger | Why | Runs | Status | Findings |
+|--------|---------|-----|------|--------|----------|
+| CEO Review | `/plan-ceo-review` | Scope and strategy | 0 | - | - |
+| Codex Review | `/codex review` | Independent 2nd opinion | 0 | - | - |
+| Eng Review | `/plan-eng-review` | Architecture and tests (required) | 1 | ISSUES_OPEN | 47 issues, 4 critical gaps, 12 decisions taken, 14 tasks queued |
+| Design Review | `/plan-design-review` | UI/UX gaps | 0 | - | - |
+| DX Review | `/plan-devex-review` | Developer experience gaps | 0 | - | - |
+| Outside Voice | `/plan-eng-review` (codex) | Independent plan challenge | 1 | ISSUES_FOUND | 8 findings, 4 verified against source, 1 cross-model tension resolved |
+
+- **CROSS-MODEL:** Codex found the review's biggest miss - `refresh()` never
+  runs without a connected Cardputer (`runner.py:311-320`), which inverts the
+  design's independence claim. It also correctly identified that the
+  `main.cpp` third-branch-vs-hal choice was a false binary, which deleted
+  `ble_stub.cpp` and the "dominant firmware effort" line from the plan. Four
+  of its eight findings were verified against source before being accepted;
+  the remaining four became tasks T11, T13 and a `TODOS.md` entry.
+- **VERDICT:** ENG REVIEW COMPLETE, PLAN REVISED - 12 decisions resolved, 14
+  tasks queued, 4 critical gaps each assigned to a task. Not CLEARED for ship
+  because nothing is implemented yet; re-run against the diff before landing.
+
+NO UNRESOLVED DECISIONS

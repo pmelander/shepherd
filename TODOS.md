@@ -93,3 +93,57 @@ be annoying in daily use.
 **Effort:** M
 **Priority:** P3
 **Depends on:** Event probe result; relay shipping with the CLI-backed source first
+
+### Event loop discards the transition it was told about
+
+**What:** `_event_loop()` (plugin/shepherd/runner.py:487) receives
+`pane.agent_status_changed` carrying `agent_status`, then throws that value away
+and marks the frame dirty so the next `refresh()` rereads current state. Also, a
+newly created pane stays unsubscribed until some *existing* subscription happens
+to fire and trigger a membership comparison.
+
+**Why:** A state change witnessed and then discarded is worse than one never
+seen, because the code looks like it handles the event. Focus the pane on the
+laptop between the event arriving and the reread landing and Herdr has already
+cleared `done`, so the reread returns `idle` and the transition that fired the
+event is gone. On Shepherd that is a missed chirp. On Bruno it is a missed
+bleat, which is the whole product.
+
+**Context:** Found by the outside voice during /plan-eng-review on 2026-09-08.
+The active decision from 2026-09-05 records why this is a poll/push hybrid:
+`pane.agent_detected` does not stream, and the push payload carries only
+agent, agent_status, pane_id and workspace_id. So the status IS in the event -
+it is being dropped, not missing. Start by having the event write the observed
+status into a short-lived per-pane record that `build()` prefers over a reread
+while it is newer than the last poll. Mind the naming trap already documented in
+tests/test_events.py: `events.subscribe` takes the DOTTED form, the emitted
+event's `type` uses UNDERSCORES, and mixing them fails silently.
+
+**Effort:** M
+**Priority:** P2
+**Depends on:** Nothing. Worth doing before Bruno's bleat depends on transitions.
+
+### Cardputer LittleFS is corrupt; the buddy runs in ASCII mode
+
+**What:** The Cardputer's LittleFS partition fails to mount -
+`Corrupted dir pair at {0x1,0x0}` - so `firmware/characters/bufo/*.gif` never
+load and the buddy falls back to ASCII rendering. Everything else on the device
+works normally.
+
+**Why:** This is currently knowledge that exists only in session transcripts,
+and it is load-bearing: the Bruno design cites it as the reason `baa.wav` goes
+into flash as a const array rather than onto the filesystem. Unrecorded, that
+argument reads as an unsupported assertion and someone will reasonably reverse
+it. It also means `xfer.h` - the character transfer feature - has no working
+end-to-end path on the only device that has it.
+
+**Context:** Noticed while investigating why the GIF characters stopped loading;
+not diagnosed further because the ASCII buddy is usable and the herd screens do
+not touch the filesystem. Two things to try: `LittleFS.format()` from a one-off
+sketch, and whether `board_build.partitions = no_ota.csv` actually leaves a
+correctly sized LittleFS region - a mismatched partition table produces exactly
+this error. If a format fixes it, record that too.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** Nothing. Bruno deliberately avoids the filesystem because of it.
