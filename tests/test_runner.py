@@ -18,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugin"))
 
 from shepherd.models import Agent, AgentStatus, HerdSnapshot  # noqa: E402
 from shepherd.runner import Runner  # noqa: E402
-from shepherd.transport import FakeTransport  # noqa: E402
+from shepherd.transport import FakeTransport, TransportError  # noqa: E402
 
 BLOCKED_PANE = """
  Do you want to proceed?
@@ -263,7 +263,115 @@ class _Gate:
         self.frames.append((set(pane_ids), dict(pending), ts))
 
 
-def test_push_loop_sends_on_change_then_holds():
+async def _spin(*coros, ticks=0.05):
+    """Run some loops briefly, then cancel them.
+
+    Re-raises anything that is not a cancellation, and that is not a detail:
+    the first version of this helper used gather(return_exceptions=True) and
+    swallowed a NameError, so a test asserting that a loop kept running passed
+    while that loop was actually dead on its first line. A helper that hides
+    exceptions turns every test built on it into a test of nothing.
+    """
+    tasks = [asyncio.create_task(c) for c in coros]
+    await asyncio.sleep(ticks)
+    for t in tasks:
+        t.cancel()
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    for res in results:
+        if isinstance(res, BaseException) and not isinstance(
+            res, asyncio.CancelledError
+        ):
+            raise res
+
+
+def test_push_loop_sends_what_the_herd_loop_built():
+    src = FakeSource([HerdSnapshot(agents=(agent(seq=1),))])
+    t = FakeTransport()
+    r, clock, _ = make(src, transport=t, tick=1.0, keepalive=10.0,
+                       poll_interval=30.0, require_signatures=False)
+    gate = _Gate()
+
+    run(_spin(r._herd_loop(), r._push_loop(t, gate)))
+
+    # At least the first frame goes out, and the gate is told about it.
+    assert len(t.sent) >= 1
+    assert gate.frames and gate.frames[0][0] == {"w2:p1"}
+    # The gate is told which frame it was, so a signed action can be bound to
+    # a frame the relay actually sent.
+    assert gate.frames[0][2], "observe_frame must carry the frame timestamp"
+
+
+def test_the_herd_is_watched_with_no_transport_at_all():
+    # THE point of separating the loops. This used to be impossible: polling
+    # lived inside the connect/serve loop, so no device meant no frames, and
+    # any second consumer of the stream saw nothing whenever the Cardputer
+    # was away.
+    src = FakeSource([HerdSnapshot(agents=(agent(seq=1),))])
+    r, clock, _ = make(src, tick=1.0, keepalive=10.0, poll_interval=30.0,
+                       require_signatures=False)
+
+    run(_spin(r._herd_loop()))
+
+    assert src.list_calls >= 1, "the herd was never polled"
+    assert r._latest is not None, "no frame was built without a device"
+    assert r._latest.gen >= 1
+    assert r._latest.payload.endswith(b"\n")
+    assert [row["i"] for row in r._latest.frame["a"]] == ["w2:p1"]
+
+
+def test_a_transport_that_never_connects_does_not_stop_the_herd_loop():
+    # The regression test for the actual bug: a relay whose device is off
+    # must still watch the herd. Every connect attempt fails, forever.
+    class DeadTransport:
+        def __init__(self):
+            self.sent = []
+            self.attempts = 0
+
+        async def connect(self):
+            self.attempts += 1
+            raise TransportError("no device advertising")
+
+        async def close(self):
+            pass
+
+    dead = DeadTransport()
+    src = FakeSource([HerdSnapshot(agents=(agent(seq=1),))])
+    r, clock, _ = make(src, transport=dead, tick=1.0,
+                       keepalive=10.0, poll_interval=30.0,
+                       require_signatures=False)
+
+    run(_spin(r._herd_loop(), r._transport_loop()))
+
+    # Without this the test would pass even if the transport loop never ran,
+    # which is precisely how the first version of it passed while dying on a
+    # NameError.
+    assert dead.attempts >= 1, "the transport loop never tried to connect"
+    assert src.list_calls >= 1, "a dead radio silenced the herd poll"
+    assert r._latest is not None, "a dead radio stopped frames being built"
+
+
+def test_the_push_loop_does_not_poll_the_herd_itself():
+    # The inverse of the separation, and the assertion that would fail if
+    # anyone moved polling back into the connect/serve path. Run the push loop
+    # with no herd loop beside it: it must find nothing to send and must not
+    # go asking Herdr on its own.
+    src = FakeSource([HerdSnapshot(agents=(agent(seq=1),))])
+    t = FakeTransport()
+    r, clock, _ = make(src, transport=t, tick=1.0, keepalive=10.0,
+                       poll_interval=30.0, require_signatures=False)
+    gate = _Gate()
+
+    run(_spin(r._push_loop(t, gate)))
+
+    assert src.list_calls == 0, "the push loop polled the herd"
+    assert t.sent == [], "the push loop invented a frame to send"
+    assert gate.frames == []
+
+
+def test_a_late_connection_gets_the_current_frame_on_its_first_tick():
+    # A device that connects after the relay has been running must not wait
+    # for the next change or keepalive to have something on screen. Same path
+    # a reconnect takes.
     src = FakeSource([HerdSnapshot(agents=(agent(seq=1),))])
     t = FakeTransport()
     r, clock, _ = make(src, transport=t, tick=1.0, keepalive=10.0,
@@ -271,22 +379,77 @@ def test_push_loop_sends_on_change_then_holds():
     gate = _Gate()
 
     async def scenario():
-        task = asyncio.create_task(r._push_loop(t, gate))
-        await asyncio.sleep(0.05)
-        r.stop()
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
+        # Herd loop runs alone first: a frame exists, nothing has been sent.
+        await _spin(r._herd_loop())
+        assert r._latest is not None
+        assert t.sent == []
+        # Now a device turns up.
+        await _spin(r._push_loop(t, gate))
 
     run(scenario())
-    # At least the first frame goes out, and the gate is told about it.
-    assert len(t.sent) >= 1
-    assert gate.frames and gate.frames[0][0] == {"w2:p1"}
-    # The gate is told which frame it was, so a signed action can be bound to
-    # a frame the relay actually sent.
-    assert gate.frames[0][2], "observe_frame must carry the frame timestamp"
+    assert len(t.sent) >= 1, "a late connection was not sent the current frame"
+
+
+def test_the_push_loop_does_not_resend_an_unchanged_generation():
+    src = FakeSource([HerdSnapshot(agents=(agent(seq=1),))])
+    t = FakeTransport()
+    r, clock, _ = make(src, transport=t, tick=1.0, keepalive=10.0,
+                       poll_interval=30.0, require_signatures=False)
+    gate = _Gate()
+
+    async def scenario():
+        await _spin(r._herd_loop())          # exactly one build
+        gen = r._latest.gen
+        await _spin(r._push_loop(t, gate))   # many ticks, one generation
+        return gen
+
+    gen = run(scenario())
+    assert gen == r._latest.gen, "the herd loop rebuilt while parked"
+    assert len(t.sent) == 1, f"resent an unchanged frame: {len(t.sent)} sends"
+
+
+def test_the_keepalive_rebuild_cycles_the_replay_window():
+    # The keepalive is not only about looking alive. The gate keeps the last
+    # six frame timestamps and refuses any action whose ts is not among them,
+    # which is the only replay protection `focus` has. Holding one frame and
+    # resending it would leave a captured frame replayable until six
+    # unrelated changes pushed it out.
+    from datetime import datetime, timedelta, timezone
+
+    from shepherd.frame import FrameBuilder
+
+    src = FakeSource([HerdSnapshot(agents=(agent(seq=1),))])
+    r, clock, _ = make(src, tick=1.0, keepalive=10.0, poll_interval=30.0,
+                       require_signatures=False)
+    # The builder stamps frames from wall-clock time at one-second resolution,
+    # so two builds in the same real millisecond share a ts and the assertion
+    # below would be vacuous. Tie the builder's clock to the fake one instead,
+    # which is what makes this test about the rebuild rather than about how
+    # fast the machine is.
+    epoch = datetime(2026, 9, 9, 12, 0, 0, tzinfo=timezone.utc)
+    r.builder = FrameBuilder(now=lambda: epoch + timedelta(seconds=clock.t))
+
+    async def scenario():
+        task = asyncio.create_task(r._herd_loop())
+        await asyncio.sleep(0)
+        first = None
+        # The fake clock only advances when the loop sleeps, so this walks
+        # past one keepalive boundary.
+        for _ in range(30):
+            await asyncio.sleep(0)
+            if first is None and r._latest is not None:
+                first = r._latest
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        return first
+
+    first = run(scenario())
+    assert first is not None
+    assert r._latest.gen > first.gen, "the keepalive never rebuilt"
+    assert r._latest.frame["ts"] != first.frame["ts"], (
+        "a keepalive rebuild reused the timestamp, so the gate's replay "
+        "window would stop cycling"
+    )
 
 
 def test_keepalive_is_below_the_device_staleness_threshold():

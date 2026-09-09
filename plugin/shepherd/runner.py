@@ -3,6 +3,27 @@
 Everything else in Shepherd is a component with a seam. This composes them,
 and the composition is where the design decisions become behaviour:
 
+* **Watching the herd and serving a device are siblings, not nested.**
+
+      run()
+        |
+        +-- _herd_loop        poll Herdr, build a frame on change or keepalive
+        +-- _event_loop       pipe subscriptions, transitions
+        +-- _transport_loop   connect / serve / reconnect, forever
+              |
+              +-- _serve(transport)
+                    +-- _push_loop     send the latest build to THIS device
+                    +-- _action_loop   read what the device says back
+
+  It used to be nested the other way round, with the poll inside the connect
+  loop, so a relay whose device was off watched nothing at all. That is
+  invisible while the device is the only consumer - a frame nobody can receive
+  is a frame nobody misses - and becomes a bug the moment anything else reads
+  the frames.
+* **One build serves every consumer.** The herd loop builds; the push loop
+  sends by generation number rather than rebuilding. Rebuilding per consumer
+  would mint a second timestamp for one herd state, and the gate's replay
+  window is keyed on those timestamps.
 * **Membership by poll, transitions by push.** Herdr has no push path for
   "an agent now exists" — `pane.agent_detected` does not stream — so
   `agent list` runs on a slow timer forever. Status transitions come over the
@@ -48,6 +69,23 @@ from .prompt import parse_prompt
 from .transport import BleTransport, Transport, TransportError, backoff_delays
 
 log = logging.getLogger("shepherd")
+
+
+@dataclass(frozen=True)
+class _Built:
+    """One frame, built once, for everyone who wants it.
+
+    `gen` is what lets the push loop send on change without rebuilding.
+    Rebuilding per consumer would mint a second timestamp for the same herd
+    state, and the timestamp is not decoration: the action gate keeps the last
+    six in `_recent_ts` and refuses any action whose `ts` is not among them.
+    Two timelines for one state would make that window mean two things.
+    """
+
+    gen: int
+    frame: Mapping
+    payload: bytes
+    pending: Mapping[str, PendingDecision]
 
 
 def herdr_supervised() -> bool:
@@ -180,6 +218,12 @@ class Runner:
     _seqs: dict[str, int] = field(default_factory=dict, init=False)
     _prompts: dict[str, tuple[int, str]] = field(default_factory=dict, init=False)
     _dirty: bool = field(default=True, init=False)
+    # The most recently built frame. Written by the herd loop, read by the
+    # transport's push loop. ONE object rather than parallel fields so a
+    # reader cannot observe a payload from one build beside the generation
+    # number of another - there is no await between the reads, so a single
+    # attribute load is atomic in practice and staying that way is deliberate.
+    _latest: "_Built | None" = field(default=None, init=False)
     _stop: bool = field(default=False, init=False)
     _herd_failing_since: float | None = field(default=None, init=False)
     # Set while a rotation is in flight; the action loop hands the ack here
@@ -309,6 +353,79 @@ class Runner:
         self._stop = True
 
     async def run(self) -> None:
+        """Watch the herd, and serve whatever devices connect.
+
+        The herd loop and the transport loop are SIBLINGS, and that ordering
+        is the whole point of this function. It used to be nested the other
+        way round: run() connected first and only a successful connection
+        started the loop that polled Herdr. So with the Cardputer in a drawer,
+        out of range, or simply off, the relay sat in its reconnect backoff
+        and watched nothing at all - no polling, no frames, no record that the
+        herd had moved. That was invisible while the device was the only
+        consumer, because a frame nobody could receive is a frame nobody
+        misses. It stops being invisible the moment a second consumer exists:
+        a wired desk companion would have gone blank precisely when the pocket
+        device left the room, and the log would have looked healthy.
+
+        The herd is what this process is about. A transport is one consumer of
+        it.
+        """
+        tasks = [
+            asyncio.create_task(self._herd_loop()),
+            asyncio.create_task(self._transport_loop()),
+        ]
+        # Subscriptions describe the herd, not the link, so this belongs here
+        # rather than inside a connection. It also used to be torn down and
+        # rebuilt on every reconnect for no reason.
+        if self.use_events:
+            tasks.append(asyncio.create_task(self._event_loop()))
+        try:
+            done, _pending = await asyncio.wait(
+                tasks, return_when=asyncio.FIRST_COMPLETED
+            )
+            for t in done:
+                exc = t.exception()
+                if exc:
+                    raise exc
+        finally:
+            for t in tasks:
+                t.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _herd_loop(self) -> None:
+        """Poll the herd and build frames, for as long as the relay runs.
+
+        Builds on change, or every keepalive. The keepalive rebuild is load
+        bearing twice over: it keeps a healthy relay from looking dead to the
+        device's own staleness rule, and it cycles the gate's `_recent_ts`
+        window, which is the only replay protection a `focus` action has.
+        Holding one frame and resending it would leave a captured frame
+        replayable until six unrelated changes happened to push it out.
+        """
+        last_poll = -1e9
+        last_build = -1e9
+        gen = 0
+        while not self._stop:
+            now = self.clock()
+            if now - last_poll >= self.poll_interval:
+                last_poll = now
+                await self.refresh()
+
+            if self._dirty or (now - last_build) >= self.keepalive:
+                frame, pending = self.build()
+                gen += 1
+                self._latest = _Built(
+                    gen=gen,
+                    frame=frame,
+                    payload=self.builder.encode(frame),
+                    pending=pending,
+                )
+                self._dirty = False
+                last_build = now
+
+            await self.sleep(self.tick)
+
+    async def _transport_loop(self) -> None:
         """Connect, serve, reconnect. Runs until stop() or cancellation."""
         delays = backoff_delays()
         while not self._stop:
@@ -339,8 +456,6 @@ class Runner:
             asyncio.create_task(self._push_loop(transport, gate)),
             asyncio.create_task(self._action_loop(transport, gate)),
         ]
-        if self.use_events:
-            tasks.append(asyncio.create_task(self._event_loop()))
         try:
             done, pending = await asyncio.wait(
                 tasks, return_when=asyncio.FIRST_COMPLETED
@@ -406,31 +521,34 @@ class Runner:
                  "device will fall back to its build-time key")
 
     async def _push_loop(self, transport: Transport, gate: ActionGate) -> None:
-        last_poll = -1e9
-        last_send = -1e9
-        while not self._stop:
-            now = self.clock()
+        """Send this connection whatever the herd loop last built.
 
+        Sends by generation rather than by building, so a device that connects
+        late gets the current frame on its first tick, and a reconnect does
+        not have to wait for the next change or keepalive to have something to
+        show. `last_gen` starting at zero is what makes that true: the herd
+        loop's first build is generation 1.
+        """
+        last_gen = 0
+        while not self._stop:
             # Cheap: one stat per tick, and rotation is a thing that happens
-            # by hand a few times in a device's life.
+            # by hand a few times in a device's life. Stays here rather than
+            # in the herd loop because rotation is a conversation WITH a
+            # device - it sends a frame and waits for the proof to come back.
             if rotate_marker().exists():
                 await self._rotate(transport, gate)
-            if now - last_poll >= self.poll_interval:
-                last_poll = now
-                await self.refresh()
 
-            if self._dirty or (now - last_send) >= self.keepalive:
-                frame, pending = self.build()
-                payload = self.builder.encode(frame)
-                await transport.send(payload)
+            built = self._latest   # one load; see the note on _Built
+            if built is not None and built.gen != last_gen:
+                await transport.send(built.payload)
                 # Only after the device has it does the gate consider those
                 # panes answerable.
                 gate.observe_frame(
-                    frozenset(r["i"] for r in frame.get("a", [])), pending,
-                    ts=frame.get("ts"),
+                    frozenset(r["i"] for r in built.frame.get("a", [])),
+                    built.pending,
+                    ts=built.frame.get("ts"),
                 )
-                self._dirty = False
-                last_send = now
+                last_gen = built.gen
 
             await self.sleep(self.tick)
 
