@@ -1,0 +1,26 @@
+# What a contributor needs on top of the relay's own runtime dependencies.
+#
+#   py -3 -m pip install -r requirements-dev.txt
+#
+# Then both suites should run clean from the repo root:
+#
+#   pytest                          # 219 relay/protocol/gate/parser tests
+#   cd firmware && pio test -e native   # 68 device-side tests, no board needed
+#
+# The native suite additionally needs a host g++. On Windows this repo used:
+#   winget install --id BrechtSanders.WinLibs.POSIX.UCRT -e
+# See the note in firmware/platformio.ini, which also explains why the winget
+# aliases are missing from an already-open shell.
+
+-r plugin/requirements.txt
+
+pytest>=9.1.1
+
+# Builds and flashes the firmware, and runs the native test suite.
+platformio>=6.1.19
+
+# Used by firmware/tools/probe_*.py to talk to a board over USB. Read the DTR
+# warning in firmware/platformio.ini before opening a port with it: the
+# obvious pyserial call asserts DTR, which on these boards is the auto-reset
+# line, so it reboots the device the moment you look at it.
+pyserial>=3.5

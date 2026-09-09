@@ -63,3 +63,14 @@ list rather than a wall.
    a flag flip instead of a re-implementation.
 2. **Advertised name.** Upstream advertises `Claude-XXXX`, which risks the Claude desktop app
    claiming the device. Shepherd advertises under its own name.
+3. **Deleted `.github/workflows/release.yml`.** Upstream's release workflow, carried in
+   pristine. It worked in upstream's repo because that repo's root is what is now this
+   `firmware/` subdirectory — but GitHub Actions only reads `.github/workflows/` at the
+   *repository* root, so vendored here it was inert: it had never run, and could not have
+   (`git tag` was empty, so its `push: tags: v*` trigger had never fired). Stripped rather
+   than kept pristine because a workflow file that looks like it publishes releases and
+   silently cannot is worse than no file — a stranger would reasonably trust it. Replaced by
+   `/.github/workflows/release.yml` at the repo root, which does the same job with
+   `working-directory: firmware` and firmware-relative paths, plus
+   `/.github/workflows/ci.yml`, which runs both test suites on every push. Found by
+   `/plan-eng-review` on 2026-09-08.

@@ -1,0 +1,28 @@
+# What the relay needs at runtime, and nothing else.
+#
+# This file exists because the repo had no dependency declaration anywhere:
+# the README simply assumed a Python with bleak already on it. That is fine on
+# the one laptop this was built on and useless to anybody else, which matters
+# now that "a stranger gets this running" is a stated goal.
+#
+# Install:
+#   py -3 -m pip install -r plugin/requirements.txt
+#
+# Floors are the versions this was actually verified against, not guesses.
+# bleak is pinned to a floor rather than an exact version because the relay
+# reads mtu_size fresh on every send and tolerates the value moving; see the
+# note in shepherd/transport.py.
+bleak>=3.0.2
+
+# NOT listed here on purpose:
+#   pyserial  - shepherd/serialport.py is in this package and does use it, but
+#               it imports `serial` lazily INSIDE its functions, and the BLE
+#               relay never calls them. So a machine with no Bruno hardware
+#               needs no pyserial to run the relay, and must not be told
+#               otherwise. Same idiom as singleton.py importing msvcrt or
+#               fcntl inside the function that needs it. pyserial moves into
+#               this file when plugin/bruno.py lands (review task T5) and the
+#               dependency becomes real at startup. It is in
+#               ../requirements-dev.txt today, which is what the firmware
+#               probe tools need.
+#   pytest    - a contributor dependency, see ../requirements-dev.txt.

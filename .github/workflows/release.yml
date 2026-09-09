@@ -1,0 +1,110 @@
+# Tag-triggered release: push a v* tag and this builds the firmware, merges it
+# into a single-offset .bin, and attaches the artifact to a GitHub Release.
+# M5Burner's "Open Custom Firmware" takes the .bin directly, and so does
+# `esptool write_flash 0x0`.
+#
+#   git tag -a v1.0.1 -m "v1.0.1"
+#   git push origin v1.0.1
+#
+# WHY THIS FILE IS AT THE REPO ROOT, and not in firmware/
+#
+# It replaces a vendored copy at firmware/.github/workflows/release.yml, which
+# came in pristine from y88huang/claude-desktop-buddy-cardputer and worked
+# there because that repo's root IS what is now our firmware/ subdirectory.
+# GitHub Actions only reads .github/workflows/ at the repository root, so the
+# vendored copy was inert here: it had never run and could not have, and
+# `git tag` was empty, so nothing had ever exercised it. It was not a broken
+# workflow, it was somebody else's workflow at somebody else's path.
+#
+# Every path below is therefore relative to the repo root, and the PlatformIO
+# steps set working-directory: firmware explicitly.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build + release firmware
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # PlatformIO's tool packages are big; cache them so repeat builds land
+      # in ~30s instead of ~3 min. The key is the firmware-relative path
+      # because that is where platformio.ini actually lives.
+      - name: Cache PlatformIO packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio/.cache
+            ~/.platformio/packages
+            ~/.platformio/platforms
+            ~/.cache/pip
+          key: ${{ runner.os }}-pio-${{ hashFiles('firmware/platformio.ini') }}
+          restore-keys: |
+            ${{ runner.os }}-pio-
+
+      - name: Install PlatformIO
+        run: |
+          python -m pip install --upgrade pip
+          pip install platformio
+
+      # No step is needed to handle the missing secret.ini, and that is worth
+      # stating because the opposite looks true. secret.ini is gitignored (it
+      # holds the shared HMAC secret), so a CI checkout does not have it, and
+      # platformio.ini names it in `extra_configs`. Verified rather than
+      # assumed: PlatformIO tolerates a missing extra_configs file silently -
+      # `pio project config` exits 0 and build_flags resolves to just
+      # ${common.cardputer_flags}, with no -DSHEPHERD_SECRET.
+      #
+      # That is exactly what a public image should be. Whoever flashes it
+      # pairs it with their OWN secret via `start.py --secret-flag` and a
+      # rebuild, or rotates one over the air. Baking a real key into a
+      # downloadable image would hand every downloader the ability to approve
+      # actions on somebody else's herd.
+      - name: Build Cardputer ADV firmware
+        working-directory: firmware
+        run: pio run -e cardputer-adv
+
+      # merge_bin.py writes release/<env>-merged.bin. Rename to include the
+      # tag so downloads from the Releases page are self-describing.
+      # refs/tags/vX.Y.Z -> vX.Y.Z
+      - name: Rename artifacts with tag
+        working-directory: firmware
+        run: |
+          TAG="${GITHUB_REF##*/}"
+          mv release/cardputer-adv-merged.bin \
+             "release/shepherd-cardputer-adv-${TAG}.bin"
+          ls -la release/
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: firmware/release/shepherd-*.bin
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+
+# When the bruno-core env exists (review task T10), add a second build step
+# and widen the files glob — merge_bin.py is generic on $PIOENV, so it needs
+# no change to produce bruno-core-merged.bin:
+#
+#   - name: Build Bruno firmware
+#     working-directory: firmware
+#     run: pio run -e bruno-core
+#
+# and rename it to shepherd-bruno-core-${TAG}.bin, which the existing
+# shepherd-*.bin glob already picks up.

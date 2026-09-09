@@ -274,9 +274,16 @@ the rotated key — `start.py --secret-flag` prints the current value to paste b
 ## Tests
 
 ```sh
-py -3 -m pytest tests/          # 178 — relay, protocol, gate, parser
-cd firmware && pio test -e native   # 41 — device-side, no board required
+py -3 -m pip install -r requirements-dev.txt
+
+pytest                              # 219 — relay, protocol, gate, parser
+cd firmware && pio test -e native   # 68 — device-side, no board required
 ```
+
+Bare `pytest` works because of `pytest.ini`'s `testpaths`. Without it, collection
+reaches `firmware/tools/`, whose hardware probe scripts call `sys.exit()` at import,
+and the whole run dies with `INTERNALERROR ... SystemExit: no stick found` rather
+than a test failure. Both suites also run in CI on every push.
 
 The native suite matters more than it looks. The device's parsing rules mirror
 `plugin/shepherd/frame.py`, and a board on a desk is the worst place to discover they

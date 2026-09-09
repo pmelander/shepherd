@@ -1,0 +1,74 @@
+# Runs both test suites on every push and pull request.
+#
+# Until this existed, nothing ran the tests except a human remembering to.
+# Both suites are cheap and neither needs hardware: the relay suite is ~2
+# seconds, and the firmware's native suite compiles the device-side headers
+# for the host and runs them under Unity in ~10 seconds. The whole point of
+# extracting shepherd_frame.h, shepherd_lock.h and shepherd_seen.h into
+# dependency-free headers was so that a board on a desk is not the only place
+# their rules can be checked.
+#
+# Deliberately NOT here: a firmware BUILD job. `pio run -e cardputer-adv`
+# downloads the full ESP32 toolchain and takes minutes, and it only proves the
+# thing compiles — the release workflow already does it when it matters. If a
+# compile break ever slips through, add it here and cache ~/.platformio.
+
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  relay:
+    name: Relay tests (pytest)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      # Bare `pytest`, on purpose: pytest.ini's testpaths is what makes this
+      # work, and running it without an explicit path is the assertion that a
+      # newcomer's first command succeeds. If someone deletes pytest.ini this
+      # job fails with the collection error rather than quietly narrowing.
+      - name: Run relay tests
+        run: pytest -q
+
+  firmware:
+    name: Firmware native tests (Unity)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install PlatformIO
+        run: |
+          python -m pip install --upgrade pip
+          pip install platformio
+
+      # The native env needs only a host compiler, which ubuntu-latest has.
+      # No board, no ESP32 toolchain, no cache needed.
+      - name: Run native tests
+        working-directory: firmware
+        run: pio test -e native
