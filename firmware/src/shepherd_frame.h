@@ -50,11 +50,23 @@
 // v3 added `o`/`w`, the option block, and a fifth field to the signed message.
 #define SHEPHERD_PROTOCOL_VERSION 3
 
-// The host caps a frame at 12 agents (its MAX_AGENTS). The binding limit is
-// data.h's line-reassembly buffer, not the BLE ring: it holds one JSON line
-// and drops the overflow silently, so a frame that does not fit presents as
-// a screen going stale rather than as an error. Matching the cap here means
-// an over-long frame is counted and truncated rather than overflowing.
+// The host caps a frame at 12 agents (its MAX_AGENTS), and this must match.
+//
+// This comment used to end by claiming that matching the cap meant "an
+// over-long frame is counted and truncated rather than overflowing." That was
+// false, and it was the most misleading kind of false: it told anyone
+// investigating a stale screen that the buffer could not be the cause. Twelve
+// agents all blocked with six max-length options each encodes to 6317 bytes,
+// measured through the real FrameBuilder, and the receive buffers were 1024
+// (USB) and 4096 (BLE). Nothing counted anything; the excess was dropped, the
+// truncated JSON failed to parse, and the frame was treated as somebody
+// else's.
+//
+// The real relationship, now that it holds: the binding limit is the
+// line-reassembly buffer in line_buf.h, not the BLE ring, and
+// SHEPHERD_LINE_MAX is asserted at compile time to exceed the measured worst
+// case. So raising this cap is not free - it grows the worst-case frame, and
+// the static_assert in line_buf.h is what will tell you.
 #define SHEPHERD_MAX_AGENTS 12
 
 #define SHEPHERD_PANE_LEN 16

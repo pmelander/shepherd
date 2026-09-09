@@ -277,7 +277,7 @@ the rotated key — `start.py --secret-flag` prints the current value to paste b
 py -3 -m pip install -r requirements-dev.txt
 
 pytest                              # 219 — relay, protocol, gate, parser
-cd firmware && pio test -e native   # 68 — device-side, no board required
+cd firmware && pio test -e native   # 83 — device-side, no board required
 ```
 
 Bare `pytest` works because of `pytest.ini`'s `testpaths`. Without it, collection

@@ -2,6 +2,7 @@
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include "ble_bridge.h"
+#include "line_buf.h"
 #include "xfer.h"
 
 struct TamaState {
@@ -137,30 +138,35 @@ static void _applyJson(const char* line, TamaState* out) {
   _lastLiveMs = millis();
 }
 
-template<size_t N>
-struct _LineBuf {
-  char buf[N];
-  uint16_t len = 0;
-  void feed(Stream& s, TamaState* out) {
-    while (s.available()) {
-      char c = s.read();
-      if (c == '\n' || c == '\r') {
-        if (len > 0) { buf[len]=0; if (buf[0]=='{') _applyJson(buf, out); len=0; }
-      } else if (len < N-1) {
-        buf[len++] = c;
-      }
-    }
-  }
-};
+// Line reassembly lives in line_buf.h, for two reasons. It could not be
+// tested here - this header pulls in Arduino, ArduinoJson, ble_bridge and
+// xfer, and the feed loop called _applyJson, which calls millis() - and the
+// two transports had two copies of the same rule, which had already drifted
+// in how they spelled the limit. One rule, two callers, and the native suite
+// can reach it. See line_buf.h for what was wrong and how it presented.
+//
+// Both buffers are the same size now. The old asymmetry (1024 for USB, 4096
+// for BLE) was upstream's status-frame size on one side and a guess on the
+// other, and BOTH were smaller than the largest frame the host can emit.
+static LineBuf<SHEPHERD_LINE_MAX> _usbLine;
+static LineBuf<SHEPHERD_LINE_MAX> _btLine;
 
-// 1024 was upstream's size for its own small status frames. Shepherd's
-// snapshot is much larger - twelve agents, each with a status, a timestamp,
-// a recap and possibly a prompt - and a line that does not fit is not
-// reported anywhere: the overflow branch below silently drops the excess
-// bytes, then the newline flushes a truncated JSON that fails to parse and
-// is treated as somebody else's frame. The screen just goes stale.
-static _LineBuf<1024> _usbLine;
-static _LineBuf<4096> _btLine;
+#if SHEPHERD_SERIAL_PROBE
+// A dropped frame means the host is sending more than this device can
+// receive, which looks exactly like the host having gone quiet: the screen
+// stops updating and nothing says why. Reported once per new drop rather
+// than once per poll.
+static uint32_t _usbDropsSeen = 0;
+static uint32_t _btDropsSeen = 0;
+static inline void _reportDrops(const char* who, uint32_t dropped,
+                                uint32_t* seen) {
+  if (dropped == *seen) return;
+  *seen = dropped;
+  Serial.printf("[line] %s dropped %lu over-long frame(s); a frame exceeded "
+                "%d bytes and was discarded rather than truncated\n",
+                who, (unsigned long)dropped, (int)SHEPHERD_LINE_MAX);
+}
+#endif
 
 inline void dataPoll(TamaState* out) {
   uint32_t now = millis();
@@ -175,22 +181,29 @@ inline void dataPoll(TamaState* out) {
     return;
   }
 
-  _usbLine.feed(Serial, out);
-  // BLE ring buffer is drained manually since it's not a Stream.
+  // Both transports, one rule. The `{` check is the caller's policy rather
+  // than the buffer's: line_buf.h reassembles lines and does not care what
+  // is in them.
+  while (Serial.available()) {
+    if (_usbLine.push((char)Serial.read())) {
+      if (_usbLine.buf[0] == '{') _applyJson(_usbLine.buf, out);
+    }
+  }
+  // The BLE ring is drained by hand because it is not a Stream. That is the
+  // only difference between these two loops, and it used to be the excuse
+  // for a second copy of the reassembly rule.
   while (bleAvailable()) {
     int c = bleRead();
     if (c < 0) break;
     _lastBtByteMs = millis();
-    if (c == '\n' || c == '\r') {
-      if (_btLine.len > 0) {
-        _btLine.buf[_btLine.len] = 0;
-        if (_btLine.buf[0] == '{') _applyJson(_btLine.buf, out);
-        _btLine.len = 0;
-      }
-    } else if (_btLine.len < sizeof(_btLine.buf) - 1) {
-      _btLine.buf[_btLine.len++] = (char)c;
+    if (_btLine.push((char)c)) {
+      if (_btLine.buf[0] == '{') _applyJson(_btLine.buf, out);
     }
   }
+#if SHEPHERD_SERIAL_PROBE
+  _reportDrops("usb", _usbLine.dropped, &_usbDropsSeen);
+  _reportDrops("ble", _btLine.dropped, &_btDropsSeen);
+#endif
 
   out->connected = dataConnected();
   if (!out->connected) {
