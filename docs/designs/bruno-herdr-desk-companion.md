@@ -469,7 +469,9 @@ and the Windows file semantics were run.
 
 8. **`_usbLine` and `_btLine` both go to 8192, not 4096.** The largest frame
    the real `FrameBuilder` can emit - 12 agents, all blocked, six
-   max-length options each - measures **6317 bytes**. So the planned 4096
+   max-length options each - measures **6317 bytes**, and 6449 once long
+   workspace names and a full recap are included too (the figure the test in
+   `tests/test_frame.py` now pins, and the one `SHEPHERD_WORST_FRAME` carries). So the planned 4096
    truncates it too, and the fix as written was 2221 bytes short of its own
    goal. A realistic herd is fine (five agents with one blocked is 1039
    bytes; all five blocked is 2663), which is why nobody has seen it.

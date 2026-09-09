@@ -449,6 +449,280 @@ def test_the_publisher_never_sees_a_rekey_frame(tmp_path):
     assert set(seen) == {"snap"}, f"the tee saw more than snapshots: {set(seen)}"
 
 
+ANSWER_PANE = """
+● Done. PR #75587 is open, your review next.
+
+"""
+
+
+def _announcements(publisher):
+    if not publisher.path.exists():
+        return []
+    out = []
+    for line in publisher.path.read_text(encoding="utf-8").splitlines():
+        f = json.loads(line)
+        if f.get("t") == "said":
+            out.append(f)
+    return out
+
+
+def _finished(pane="w2:p1", seq=7):
+    return HerdSnapshot(agents=(agent(pane, AgentStatus.DONE, seq),))
+
+
+def make_announcer(src, tmp_path, **kw):
+    from shepherd.publish import STREAM_NAME, FramePublisher
+
+    publisher = FramePublisher(path=tmp_path / STREAM_NAME)
+    r, clock, slept = make(src, tick=1.0, keepalive=10.0, poll_interval=30.0,
+                           require_signatures=False, publisher=publisher, **kw)
+    return r, publisher
+
+
+def test_a_finished_agent_is_announced_once_with_what_it_said(tmp_path):
+    src = FakeSource([_finished()], pane_text=ANSWER_PANE)
+    r, publisher = make_announcer(src, tmp_path)
+
+    async def scenario():
+        await r.refresh()
+        await _spin(r._message_loop())
+
+    run(scenario())
+
+    said = _announcements(publisher)
+    assert len(said) == 1, f"expected exactly one announcement, got {len(said)}"
+    assert said[0]["i"] == "w2:p1"
+    assert said[0]["b"] == "Done. PR #75587 is open, your review next."
+
+
+def test_the_pane_is_read_once_per_completion_not_once_per_tick(tmp_path):
+    # A read spawns a herdr process, and the message loop wakes every tick, so
+    # an agent parked in `done` must not be re-read on each one. This is the
+    # seq check doing the work.
+    src = FakeSource([_finished()], pane_text=ANSWER_PANE)
+    r, publisher = make_announcer(src, tmp_path)
+
+    async def scenario():
+        await r.refresh()
+        await _spin(r._message_loop())
+
+    run(scenario())
+    assert src.read_calls == ["w2:p1"], src.read_calls
+    assert len(_announcements(publisher)) == 1
+
+
+def test_finishing_again_is_announced_again(tmp_path):
+    # done(seq=7) -> working -> done(seq=9) is two pieces of news. Keyed on
+    # the seq, so this works without clearing anything on the way out.
+    src = FakeSource([_finished(seq=7)], pane_text=ANSWER_PANE)
+    r, publisher = make_announcer(src, tmp_path)
+
+    async def scenario():
+        await r.refresh()
+        await _spin(r._message_loop())
+        src.snapshots = [_finished(seq=9)]
+        await r.refresh()
+        await _spin(r._message_loop())
+
+    run(scenario())
+    assert len(_announcements(publisher)) == 2
+
+
+def test_only_done_agents_are_announced(tmp_path):
+    for status in (AgentStatus.IDLE, AgentStatus.WORKING, AgentStatus.BLOCKED,
+                   AgentStatus.UNKNOWN):
+        src = FakeSource([HerdSnapshot(agents=(agent(status=status),))],
+                         pane_text=ANSWER_PANE)
+        r, publisher = make_announcer(src, tmp_path / status.value)
+
+        async def scenario():
+            await r.refresh()
+            await _spin(r._message_loop())
+
+        run(scenario())
+        assert _announcements(publisher) == [], f"{status.value} was announced"
+
+
+def test_an_agent_that_moves_on_mid_read_is_not_announced(tmp_path):
+    # state_change_seq labels a cache entry; it does NOT make the read atomic
+    # with the completion. If the human focused the pane while the read was in
+    # flight, Herdr has already cleared `done` and there is nothing to
+    # announce - publishing would attribute a sentence to a state that is over.
+    src = FakeSource([_finished(seq=7)], pane_text=ANSWER_PANE)
+    r, publisher = make_announcer(src, tmp_path)
+
+    async def read_then_move_on(pane_id, lines=40):
+        src.read_calls.append(pane_id)
+        # The world moves while we are awaiting the pane.
+        r._snapshot = HerdSnapshot(
+            agents=(agent(pane_id, AgentStatus.WORKING, 8),)
+        )
+        return ANSWER_PANE
+
+    async def scenario():
+        await r.refresh()
+        src.read_pane = read_then_move_on
+        await _spin(r._message_loop())
+
+    run(scenario())
+    assert src.read_calls, "the read never happened, so nothing was tested"
+    assert _announcements(publisher) == []
+
+
+def test_an_agent_that_vanishes_mid_read_is_not_announced(tmp_path):
+    src = FakeSource([_finished(seq=7)], pane_text=ANSWER_PANE)
+    r, publisher = make_announcer(src, tmp_path)
+
+    async def read_then_vanish(pane_id, lines=40):
+        src.read_calls.append(pane_id)
+        r._snapshot = HerdSnapshot(agents=())
+        return ANSWER_PANE
+
+    async def scenario():
+        await r.refresh()
+        src.read_pane = read_then_vanish
+        await _spin(r._message_loop())
+
+    run(scenario())
+    assert src.read_calls
+    assert _announcements(publisher) == []
+
+
+def test_a_failed_read_still_announces_with_no_sentence(tmp_path):
+    # The agent DID finish. An unreadable pane costs the speech bubble, not
+    # the announcement.
+    src = FakeSource([_finished()], pane_text=ANSWER_PANE)
+    r, publisher = make_announcer(src, tmp_path)
+
+    async def explode(pane_id, lines=40):
+        src.read_calls.append(pane_id)
+        raise RuntimeError("herdr fell over")
+
+    async def scenario():
+        await r.refresh()
+        src.read_pane = explode
+        await _spin(r._message_loop())
+
+    run(scenario())
+    said = _announcements(publisher)
+    assert len(said) == 1
+    assert said[0]["b"] == ""
+
+
+def test_a_persistently_failing_read_is_not_retried_every_tick(tmp_path):
+    # The reason the seq is claimed BEFORE the read rather than on success.
+    # An agent parked in `done` behind an unreadable pane would otherwise get
+    # a herdr process spawned for it once a second, forever. One missed
+    # sentence is cheaper, and the announcement still goes out without it.
+    src = FakeSource([_finished()], pane_text=ANSWER_PANE)
+    r, publisher = make_announcer(src, tmp_path)
+
+    async def always_explode(pane_id, lines=40):
+        src.read_calls.append(pane_id)
+        raise RuntimeError("pane unreadable")
+
+    async def scenario():
+        await r.refresh()
+        src.read_pane = always_explode
+        await _spin(r._message_loop())
+
+    run(scenario())
+    assert len(src.read_calls) == 1, (
+        f"a failing read was retried {len(src.read_calls)} times; that is a "
+        f"subprocess per tick for as long as the agent stays done"
+    )
+    assert len(_announcements(publisher)) == 1
+
+
+def test_a_pane_with_nothing_to_say_still_announces(tmp_path):
+    src = FakeSource([_finished()], pane_text="   \n\n")
+    r, publisher = make_announcer(src, tmp_path)
+
+    async def scenario():
+        await r.refresh()
+        await _spin(r._message_loop())
+
+    run(scenario())
+    said = _announcements(publisher)
+    assert len(said) == 1 and said[0]["b"] == ""
+
+
+def test_the_bubble_text_is_bounded_and_keeps_the_end(tmp_path):
+    from shepherd.frame import SAID_MAX
+
+    tail = "and the last thing it concluded."
+    pane = "\n● " + ("filler " * 200) + tail + "\n\n"
+    src = FakeSource([_finished()], pane_text=pane)
+    r, publisher = make_announcer(src, tmp_path)
+
+    async def scenario():
+        await r.refresh()
+        await _spin(r._message_loop())
+
+    run(scenario())
+    body = _announcements(publisher)[0]["b"]
+    assert len(body) <= SAID_MAX, f"{len(body)} > {SAID_MAX}"
+    assert body.endswith(tail), "truncation kept the wrong half"
+    assert body.startswith("..."), "no marker that text was dropped"
+
+
+def test_an_announcement_is_never_sent_to_the_device(tmp_path):
+    # The whole reason `said` is not a `deet`. Shepherd applies a detail frame
+    # unconditionally and would swap the screen out from under a reader.
+    src = FakeSource([_finished()], pane_text=ANSWER_PANE)
+    t = FakeTransport()
+    from shepherd.publish import STREAM_NAME, FramePublisher
+
+    publisher = FramePublisher(path=tmp_path / STREAM_NAME)
+    r, clock, _ = make(src, transport=t, tick=1.0, keepalive=10.0,
+                       poll_interval=30.0, require_signatures=False,
+                       publisher=publisher)
+    gate = _Gate()
+
+    async def scenario():
+        await r.refresh()
+        await _spin(r._message_loop(), r._herd_loop(), r._push_loop(t, gate))
+
+    run(scenario())
+
+    assert _announcements(publisher), "nothing was announced"
+    for payload in t.sent:
+        frame = json.loads(payload.decode("utf-8"))
+        assert frame["t"] != "said", "an announcement reached the device"
+
+
+def test_a_vanished_agent_is_forgotten(tmp_path):
+    # Bounded memory. Nothing clears _announced on leaving `done` - it is
+    # keyed on the seq - so the vanish path is the only thing keeping this
+    # from growing for the life of the relay.
+    src = FakeSource([_finished()], pane_text=ANSWER_PANE)
+    r, publisher = make_announcer(src, tmp_path)
+
+    async def scenario():
+        await r.refresh()
+        await _spin(r._message_loop())
+        assert r._announced == {"w2:p1": 7}, r._announced
+        src.snapshots = [HerdSnapshot(agents=())]
+        await r.refresh()
+
+    run(scenario())
+    assert r._announced == {}, "a vanished pane was remembered forever"
+
+
+def test_announcing_does_not_need_a_publisher(tmp_path):
+    # A relay with no tee wired must not fall over trying to announce.
+    src = FakeSource([_finished()], pane_text=ANSWER_PANE)
+    r, clock, _ = make(src, tick=1.0, keepalive=10.0, poll_interval=30.0,
+                       require_signatures=False)
+
+    async def scenario():
+        await r.refresh()
+        await _spin(r._message_loop())
+
+    run(scenario())
+    assert r._announced == {"w2:p1": 7}
+
+
 def test_the_push_loop_does_not_poll_the_herd_itself():
     # The inverse of the separation, and the assertion that would fail if
     # anyone moved polling back into the connect/serve path. Run the push loop

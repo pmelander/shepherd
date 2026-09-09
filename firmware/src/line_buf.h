@@ -34,17 +34,20 @@
 
 // The largest frame plugin/shepherd/frame.py can emit, measured rather than
 // reasoned about: twelve agents (its MAX_AGENTS), every one blocked, each
-// carrying six options at OPTION_MAX, encodes to 6317 bytes. A realistic herd
-// is nowhere near it - five agents with one blocked is 1039 bytes, and all
-// five blocked is 2663 - which is exactly why the old limits held for months
-// and would have failed on a busy afternoon.
+// carrying six options at OPTION_MAX, long workspace names and a full recap.
+// A realistic herd is nowhere near it - five agents with one blocked is about
+// 1KB - which is exactly why the old limits held for months and would have
+// failed on a busy afternoon.
 //
-// Re-measure if the frame grows a field. Build the worst case through the
-// real FrameBuilder; do not add up the constants by hand, which is how 4096
-// came to look sufficient.
-#define SHEPHERD_WORST_FRAME 6317
+// The number is not a guess and it is not maintained here by hand:
+// tests/test_frame.py::test_the_worst_case_frame_fits_the_device_line_buffer
+// builds it through the real FrameBuilder and asserts it against 8192, with a
+// lower bound so the worst case cannot shrink out from under this constant
+// unnoticed. Re-measure there if the frame grows a field; do not add up the
+// constants by hand, which is how 4096 came to look sufficient.
+#define SHEPHERD_WORST_FRAME 6449
 
-// Rounded up to the next power of two, which leaves 1875 bytes of headroom so
+// Rounded up to the next power of two, which leaves 1743 bytes of headroom so
 // one added per-agent field does not silently put us back where we started.
 // Two of these live in .bss (one per transport) for 16KB total, against
 // roughly 320KB of DRAM - the build reports 31.6% used before this change.

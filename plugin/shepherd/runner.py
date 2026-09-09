@@ -8,6 +8,7 @@ and the composition is where the design decisions become behaviour:
       run()
         |
         +-- _herd_loop        poll Herdr, build a frame on change or keepalive
+        +-- _message_loop     read what an agent said when it finished
         +-- _event_loop       pipe subscriptions, transitions
         +-- _transport_loop   connect / serve / reconnect, forever
               |
@@ -34,6 +35,12 @@ and the composition is where the design decisions become behaviour:
 * **The blocking question is fetched once**, on the transition into blocked,
   and cached against that agent's `state_change_seq`. Re-reading a pane every
   tick would spawn a process per second per blocked agent.
+* **A finished agent's sentence is fetched off the critical path.** The
+  blocking question is fetched inside refresh(), where each read carries a 15s
+  timeout, so several slow reads can stall the herd loop for over a minute.
+  The completion message gets its own loop instead, and the celebration does
+  not wait for it: the snapshot already says the agent is done, so a slow read
+  delays the speech bubble rather than the bleat.
 * **The action gate is told what is on screen** after every frame, so its
   allowlist describes what was actually rendered rather than what the device
   claims.
@@ -67,6 +74,7 @@ from .herdr import CliHerdrSource, HerdrSource
 from .models import AgentStatus, HerdSnapshot
 from .prompt import parse_prompt
 from .publish import FramePublisher
+from .recap import extract_answer
 from .transport import BleTransport, Transport, TransportError, backoff_delays
 
 log = logging.getLogger("shepherd")
@@ -224,6 +232,13 @@ class Runner:
     _snapshot: HerdSnapshot = field(default_factory=HerdSnapshot, init=False)
     _seqs: dict[str, int] = field(default_factory=dict, init=False)
     _prompts: dict[str, tuple[int, str]] = field(default_factory=dict, init=False)
+    # Which completion has already been announced, as pane -> the seq it
+    # finished on. Keyed on seq rather than cleared on leaving `done`, so
+    # an agent that finishes, works, and finishes again is announced twice
+    # without needing a pop to make that true. The pop that DOES matter is
+    # for a vanished pane, below: otherwise this grows for the life of the
+    # relay.
+    _announced: dict[str, int] = field(default_factory=dict, init=False)
     _dirty: bool = field(default=True, init=False)
     # The most recently built frame. Written by the herd loop, read by the
     # transport's push loop. ONE object rather than parallel fields so a
@@ -282,6 +297,7 @@ class Runner:
         for pane_id in gone:
             self._seqs.pop(pane_id, None)
             self._prompts.pop(pane_id, None)
+            self._announced.pop(pane_id, None)
             self._dirty = True
 
         if not self._snapshot.ok:
@@ -380,6 +396,7 @@ class Runner:
         """
         tasks = [
             asyncio.create_task(self._herd_loop()),
+            asyncio.create_task(self._message_loop()),
             asyncio.create_task(self._transport_loop()),
         ]
         # Subscriptions describe the herd, not the link, so this belongs here
@@ -440,25 +457,100 @@ class Runner:
                 # transport path. The allowlist in publish.py is the actual
                 # guard; this is defence in depth, not a substitute for it.
                 #
-                # Guarded here as well as inside the publisher, because "the
-                # tee fails alone" has to hold for ANY publisher, not only for
-                # the one that guards itself. Without this an exception in a
-                # tee kills the herd loop, which stops the polling, which
-                # stops the device being served - a subscriber's bug taking
-                # down the thing it subscribes to.
-                if self.publisher is not None:
-                    try:
-                        self.publisher.publish(frame, payload)
-                        self._publish_failing = False
-                    except Exception as e:  # noqa: BLE001 - deliberate
-                        if not self._publish_failing:
-                            log.warning(
-                                "the frame publisher raised (%s); continuing "
-                                "without it. The device is unaffected.", e
-                            )
-                            self._publish_failing = True
+                # Guarded inside _publish as well as inside the publisher,
+                # because "the tee fails alone" has to hold for ANY
+                # publisher, not only for the one that guards itself.
+                self._publish(frame, payload)
 
             await self.sleep(self.tick)
+
+    def _publish(self, frame: Mapping, payload: bytes | None = None) -> None:
+        """Hand one frame to the tee, and never let the tee break the relay.
+
+        Without this guard an exception in a publisher kills the loop that
+        called it, which stops the polling, which stops the device being
+        served - a subscriber's bug taking down the thing it subscribes to.
+        Logged once per outage rather than once per frame.
+        """
+        if self.publisher is None:
+            return
+        try:
+            self.publisher.publish(
+                frame, payload if payload is not None
+                else self.builder.encode(frame)
+            )
+            self._publish_failing = False
+        except Exception as e:  # noqa: BLE001 - deliberately broad
+            if not self._publish_failing:
+                log.warning("the frame publisher raised (%s); continuing "
+                            "without it. The device is unaffected.", e)
+                self._publish_failing = True
+
+    # -- announcements ------------------------------------------------------
+
+    async def _message_loop(self) -> None:
+        """Announce what an agent said, once per completion.
+
+        Its own task, and that is the point. `_fetch_prompts` runs inside
+        refresh(), where each read carries a 15s timeout, so five slow reads
+        can stall the whole herd loop for over a minute. Adding a second
+        sequential fetch there would have doubled that exposure. Here a slow
+        read delays only the sentence.
+
+        Which is affordable, because the sentence is NOT what makes Bruno
+        celebrate. The snapshot already says the agent is done, and that
+        arrives on the next build - so the bleat is immediate and this frame
+        fills the speech bubble afterwards. "Allow a celebration without
+        text" falls out of the split rather than needing a rule.
+        """
+        while not self._stop:
+            await self._announce_finished()
+            await self.sleep(self.tick)
+
+    async def _announce_finished(self) -> None:
+        for a in self._snapshot.agents:
+            if a.status is not AgentStatus.DONE:
+                continue
+            if self._announced.get(a.pane_id) == a.state_change_seq:
+                continue
+
+            # Claimed BEFORE the read, which makes a completion attempted
+            # exactly once. Not for concurrency - this loop awaits
+            # _announce_finished() to completion, so there is never a second
+            # attempt in flight - but so that a FAILING read is not retried.
+            # Claiming on success instead would mean an agent that sits in
+            # `done` behind an unreadable pane gets a herdr process spawned
+            # for it every tick, forever. One missed sentence is cheaper, and
+            # the announcement still goes out without it.
+            self._announced[a.pane_id] = a.state_change_seq
+
+            text = ""
+            try:
+                # Same call the detail screen makes, so both show the same
+                # thing: the detection buffer at 80 lines, through the same
+                # extractor.
+                pane = await self.source.read_pane(a.pane_id, lines=80)
+                text = extract_answer(pane)
+            except Exception as e:  # noqa: BLE001
+                # An unreadable pane is not worth losing the announcement
+                # over; it just arrives without a sentence.
+                log.debug("could not read %s for its recap (%s)", a.pane_id, e)
+
+            # Reject an obsolete result. state_change_seq labels the cache
+            # entry, it does NOT make the read atomic with the completion: the
+            # agent can have started working again, or vanished, while the
+            # read was in flight. Publishing then would attribute a sentence
+            # to a state that is over.
+            current = self._snapshot.by_pane().get(a.pane_id)
+            if (current is None
+                    or current.state_change_seq != a.state_change_seq
+                    or current.status is not AgentStatus.DONE):
+                log.debug("%s moved on while reading its recap; not "
+                          "announcing", a.pane_id)
+                continue
+
+            self._publish(self.builder.said_frame(a.pane_id, text))
+            log.info("announced %s finishing (%d chars)", a.pane_id, len(text))
 
     async def _transport_loop(self) -> None:
         """Connect, serve, reconnect. Runs until stop() or cancellation."""

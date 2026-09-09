@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from typing import Callable, Iterable, Mapping
 
 from .models import Agent, AgentStatus, HerdSnapshot
+from .recap import truncate_body
 
 # Bumped whenever the frame's shape changes. The device refuses a mismatch
 # and says so on screen, rather than rendering fields it does not understand.
@@ -71,6 +72,12 @@ RECAP_MAX = 64
 # QUESTION, which makes the whole prompt unapprovable, because you cannot
 # consent to what you were not shown.
 MAX_OPTIONS = 6
+
+# A speech bubble is about three lines of thirty characters. Deliberately much
+# smaller than BODY_MAX (900), which is sized for a scrollable detail screen
+# on a device with keys: nothing can scroll a bubble, so anything past what
+# fits is weight on the wire for text nobody will read.
+SAID_MAX = 120
 OPTION_MAX = 40
 
 _ALIAS_STRIP = re.compile(r"[^A-Za-z0-9]+")
@@ -378,6 +385,34 @@ class FrameBuilder:
         one it is about to draw.
         """
         return {"t": "deet", "v": PROTOCOL_VERSION, "i": pane_id, "b": body}
+
+    @staticmethod
+    def said_frame(pane_id: str, text: str) -> dict:
+        """What one agent said as it finished. Published, never sent by BLE.
+
+        A separate frame type from `deet` on purpose, and the reason is worth
+        keeping next to the code. `deet` means "the body you asked me for":
+        the device requests one and applies it unconditionally, resetting the
+        scroll position and restarting the type-out animation. An unsolicited
+        `deet` arriving over BLE would therefore yank the screen out from
+        under someone mid-read.
+
+        `said` means "this agent finished and here is its sentence", which
+        nobody asked for. Giving it its own `t` makes Shepherd immune by
+        construction rather than by routing discipline: a frame type it does
+        not know returns NOT_MINE and falls through doing nothing, so the
+        pocket device needs no edit and no reflash. One `t`, one meaning, on
+        a stream other people's clients read.
+        """
+        return {
+            "t": "said",
+            "v": PROTOCOL_VERSION,
+            "i": pane_id,
+            # truncate_body keeps the END, which is the right half of an
+            # answer: it opens with what the agent did and closes with what
+            # it concluded and what it needs next.
+            "b": truncate_body(text, SAID_MAX),
+        }
 
     def encode(self, frame: Mapping) -> bytes:
         return (json.dumps(frame, separators=(",", ":"), ensure_ascii=False)

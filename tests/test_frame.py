@@ -18,8 +18,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugin"))
 from shepherd.frame import (  # noqa: E402
     ALIAS_LEN,
     MAX_AGENTS,
+    MAX_OPTIONS,
+    OPTION_MAX,
     PROMPT_MAX,
     PROTOCOL_VERSION,
+    SAID_MAX,
     FrameBuilder,
     decision_id,
     derive_alias,
@@ -355,18 +358,79 @@ def test_a_long_recap_is_cut_silently():
     assert truncate_recap(None) == ""
 
 
-def test_a_full_herd_with_recaps_still_fits_the_device_line_buffer():
-    # The device reassembles one JSON line at a time and drops the overflow
-    # silently - a stale screen, not an error - so this bound is the one that
-    # actually matters. 4096 is the buffer; the margin is deliberate.
+def test_the_worst_case_frame_fits_the_device_line_buffer():
+    # The bound that actually matters: the device reassembles one JSON line at
+    # a time, and a line that does not fit is discarded - a stale screen, not
+    # an error.
+    #
+    # This test used to omit the option block and assert < 4096, and both were
+    # wrong. Without options a full herd is about 3KB, so it passed happily
+    # while the REAL worst case - every agent blocked, each carrying
+    # MAX_OPTIONS labels at OPTION_MAX - is 6317 bytes and silently overflowed
+    # the 4096-byte buffer the comment named. The buffer is SHEPHERD_LINE_MAX
+    # (8192) in firmware/src/line_buf.h, which carries the same number and a
+    # static_assert against it.
     b = FrameBuilder(now=Clock())
     agents = tuple(
-        agent(f"w{i}:p1", status=AgentStatus.BLOCKED, seq=i,
+        agent(f"w{i:02d}:pane{i:02d}", status=AgentStatus.BLOCKED, seq=i,
               cwd=rf"C:\.workspaces\some-fairly-long-workspace-name-{i}",
-              title="x" * 80)
+              title="x" * RECAP_MAX)
         for i in range(MAX_AGENTS)
     )
     prompts = {a.pane_id: "y" * 400 for a in agents}
-    b.build(HerdSnapshot(agents=agents), prompts)   # seed _seen so `e` appears
-    payload = b.encode(b.build(HerdSnapshot(agents=agents), prompts))
-    assert len(payload) < 4096, len(payload)
+    options = {
+        a.pane_id: tuple(("O" * OPTION_MAX, "w") for _ in range(MAX_OPTIONS))
+        for a in agents
+    }
+    b.build(HerdSnapshot(agents=agents), prompts, options)   # seed _seen
+    payload = b.encode(b.build(HerdSnapshot(agents=agents), prompts, options))
+
+    # Keep this assertion in step with SHEPHERD_LINE_MAX. If the frame grows a
+    # field, re-measure and raise both together - do not relax this alone.
+    assert len(payload) < 8192, len(payload)
+    # And a lower bound, so nobody can make this pass by accidentally
+    # shrinking the worst case out from under the firmware's assert.
+    assert len(payload) > 6000, (
+        f"the worst case shrank to {len(payload)}; re-measure and update "
+        f"SHEPHERD_WORST_FRAME in firmware/src/line_buf.h"
+    )
+
+
+# ------------------------------------------------------------ said frames
+
+
+def test_a_said_frame_is_its_own_type_not_a_detail():
+    # The point of decision 4 in the plan review. `deet` means "the body you
+    # asked for" and the device applies one unconditionally, resetting scroll
+    # and restarting the type-out - so an unsolicited one would yank the
+    # screen. A distinct `t` makes Shepherd ignore it instead.
+    said = FrameBuilder.said_frame("w1:p1", "All done.")
+    deet = FrameBuilder.detail_frame("w1:p1", "All done.")
+    assert said["t"] == "said"
+    assert deet["t"] == "deet"
+    assert said["t"] != deet["t"]
+    assert said["v"] == PROTOCOL_VERSION
+    assert said["i"] == "w1:p1"
+    assert said["b"] == "All done."
+
+
+def test_a_said_frame_with_nothing_to_say_is_still_a_valid_frame():
+    said = FrameBuilder.said_frame("w1:p1", "")
+    assert said["b"] == ""
+    assert said["i"] == "w1:p1"
+
+
+def test_a_said_frame_keeps_the_end_of_a_long_answer():
+    tail = "and here is what it concluded."
+    said = FrameBuilder.said_frame("w1:p1", ("filler " * 200) + tail)
+    assert len(said["b"]) <= SAID_MAX
+    assert said["b"].endswith(tail)
+    assert said["b"].startswith("...")
+
+
+def test_a_said_frame_is_much_smaller_than_a_detail_frame():
+    # A bubble cannot scroll, so anything past what fits is weight on the wire
+    # for text nobody will read.
+    long_text = "z" * 2000
+    assert len(FrameBuilder.said_frame("w1:p1", long_text)["b"]) <= SAID_MAX
+    assert len(FrameBuilder.detail_frame("w1:p1", long_text)["b"]) > SAID_MAX
