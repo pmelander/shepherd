@@ -404,7 +404,7 @@ def test_a_said_frame_is_its_own_type_not_a_detail():
     # asked for" and the device applies one unconditionally, resetting scroll
     # and restarting the type-out - so an unsolicited one would yank the
     # screen. A distinct `t` makes Shepherd ignore it instead.
-    said = FrameBuilder.said_frame("w1:p1", "All done.")
+    said = FrameBuilder(now=Clock()).said_frame("w1:p1", "All done.")
     deet = FrameBuilder.detail_frame("w1:p1", "All done.")
     assert said["t"] == "said"
     assert deet["t"] == "deet"
@@ -415,14 +415,14 @@ def test_a_said_frame_is_its_own_type_not_a_detail():
 
 
 def test_a_said_frame_with_nothing_to_say_is_still_a_valid_frame():
-    said = FrameBuilder.said_frame("w1:p1", "")
+    said = FrameBuilder(now=Clock()).said_frame("w1:p1", "")
     assert said["b"] == ""
     assert said["i"] == "w1:p1"
 
 
 def test_a_said_frame_keeps_the_end_of_a_long_answer():
     tail = "and here is what it concluded."
-    said = FrameBuilder.said_frame("w1:p1", ("filler " * 200) + tail)
+    said = FrameBuilder(now=Clock()).said_frame("w1:p1", ("filler " * 200) + tail)
     assert len(said["b"]) <= SAID_MAX
     assert said["b"].endswith(tail)
     assert said["b"].startswith("...")
@@ -432,5 +432,5 @@ def test_a_said_frame_is_much_smaller_than_a_detail_frame():
     # A bubble cannot scroll, so anything past what fits is weight on the wire
     # for text nobody will read.
     long_text = "z" * 2000
-    assert len(FrameBuilder.said_frame("w1:p1", long_text)["b"]) <= SAID_MAX
+    assert len(FrameBuilder(now=Clock()).said_frame("w1:p1", long_text)["b"]) <= SAID_MAX
     assert len(FrameBuilder.detail_frame("w1:p1", long_text)["b"]) > SAID_MAX

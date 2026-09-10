@@ -104,10 +104,15 @@ All six confirmed in session.
 3. **One source of frames.** The relay takes a singleton lock deliberately, so
    two relays cannot fight over one device. Bruno must therefore consume the
    existing relay's output rather than poll Herdr itself.
-4. **Bruno inherits a bug on day one.** `_usbLine` is still `_LineBuf<1024>`
-   while frames reach ~1.4KB with option blocks. That is the same silent
-   truncation fixed on `_btLine` and never fixed on the serial side. It presents
-   as a screen that simply stops updating.
+4. ~~**Bruno inherits a bug on day one.**~~ **Fixed, and it was worse than
+   this said.** The premise was right that `_usbLine` at 1024 silently
+   truncated, and wrong that `_btLine` was the fixed side: at 4096 it was
+   also too small. A worst-case frame measures 6449 bytes, so BOTH buffers
+   dropped a full herd, and Shepherd had been carrying the bug on BLE all
+   along. Both are `SHEPHERD_LINE_MAX` (8192) now, tied to the measurement by
+   a `static_assert` and by a conformance test that rebuilds the worst case.
+   Line reassembly moved to `line_buf.h` where it can be tested off the
+   board.
 5. **Speaking needs a push, not a fetch.** Shepherd pulls an answer on a
    keypress. Bruno has no input, so the relay must push the answer when an agent
    finishes. That is a change to the push loop.
@@ -222,7 +227,7 @@ the option of showing the same sentence later without a keypress.
   `bruno_ui.cpp`.
 - Reuses `shepherd_frame.h` unchanged, so the native suite covers Bruno's
   parsing for free.
-- Fixes `_usbLine` to 4096 (premise 4) before anything else.
+- Fixes `_usbLine` to 8192, not 4096 - see premise 4 and decision 8.
 - New `bruno_ui.cpp`: one avatar, one speech bubble, at 320×240.
 - Bruno's states map to what the relay already reports: `working` → busy,
   `blocked` → attention **with the prompt `q` in the bubble** (Bruno cannot
@@ -351,23 +356,24 @@ The goal is other Herdr users, so this is load-bearing.
 
 ## Next Steps
 
-1. Fix `_usbLine` to 4096. Do this first and separately: it is a bug in shipped
-   code, on the serial path Shepherd does not use and its tests do not cover,
-   and it is worth a commit of its own regardless of whether Bruno happens.
-2. Add the tee to the relay: guarded write, rename-and-reopen rotation. Small,
-   additive, testable against the existing fakes with no hardware.
-3. Add `m` with push-on-completion and **no version bump**, cached against
-   `state_change_seq` and popped when the agent leaves `done`. Tests for both
-   halves of that cache — a per-tick `herdr agent read` would spawn a process a
-   second, and a missing pop puts a stale sentence on a working agent.
-4. Write `plugin/bruno.py` against a **hand-written frames file**, no board
-   attached. Deassert DTR and RTS before `open()`. This step is fully testable
-   today and should be finished before the hardware arrives.
-4b. Wire the opt-in: a second `[[startup]]` entry for `bruno.py`, and the
-   `bruno.port` check that makes it exit 0 on an install without hardware.
-   Test it by running with no port file present and confirming one log line and
-   no lingering process — a Shepherd user who never buys a Core must not
-   notice Bruno exists.
+Everything that does not need the board is built. The numbered list below is
+the original plan; the state after it is what is actually true.
+
+1. ~~Fix `_usbLine`~~ **Done**, to 8192 rather than 4096, with the logic
+   extracted to `line_buf.h` and 15 native tests. Its own commit, as intended.
+2. ~~Add the tee~~ **Done**, with a frame-type allowlist rather than a mirror
+   of `send()`, because the rekey frame carries the shared secret.
+3. ~~Add `m` with push-on-completion~~ **Superseded by decision 4.** A
+   per-agent `m` would have tripped the frame's `static_assert`; the
+   announcement is its own `said` frame instead, published to the stream only.
+   The cache and the pop landed as planned, keyed on `state_change_seq`.
+4. ~~Write `plugin/bruno.py` against a hand-written frames file~~ **Done**,
+   including a round-trip test that writes with the relay's own publisher and
+   reads with Bruno's own follower, so a format change on either side fails a
+   test rather than a desk.
+4b. ~~Wire the opt-in~~ **Done.** Verified by running with no port file: one
+   log line, exit 0, no lock file, nothing left behind. The second
+   `[[startup]]` entry firing is still unverified - see below.
 5. **When the board lands, probe before you code.** In order: does `Serial`
    reach USB at all (the one with no fallback); `esptool flash_id` for the real
    chip and flash size; then buttons, speaker, IMU. Record what the board
@@ -375,9 +381,12 @@ The goal is other Herdr users, so this is load-bearing.
 6. Decide the `main.cpp` question with the board in hand: third `#ifdef` branch,
    or move the board-conditional parts behind `hal.h`. Expect this to dominate
    the firmware effort.
-7. Then `bruno_ui.cpp`.
+7. Then `bruno_ui.cpp`, reusing `drawStale` and `drawBadVersion` only, and
+   with the one-bubble policy decided (task T11).
 8. Before release: the `platforms = ["windows"]` blocker, or the open-source
-   goal is not met.
+   goal is not met. The rest of the distribution plumbing is done - the
+   release workflow is at the repo root where Actions can actually read it,
+   there is CI on both suites, and the dependencies are declared.
 
 ## What I noticed about how you think
 
@@ -522,23 +531,24 @@ and the Windows file semantics were run.
 
 Not decisions left open, but text the plan does not yet contain:
 
-- **The stream contract** (task T13): where a subscriber starts, what happens
-  on reconnect, retention, duplicate semantics, and an actual rotation cap
-  rather than "a small cap". Starting at EOF discards completions from before
-  the subscriber started, and rotating away a file with unread lines in it
-  loses them; "never coalesce announcements" is not a delivery guarantee.
-  Recommended cap unless you prefer otherwise: 2MB with one `.1` backup,
-  bounding disk at 4MB - roughly five hours of realistic history at the 10s
-  keepalive floor (about 9MB/day at realistic frame sizes).
+- ~~**The stream contract** (task T13)~~ **Written**, below, once the
+  follower existed - several of the answers were only obvious with the code
+  in front of me. Cap is 2MB with one archive, bounding disk at 4MB.
 - **The one-bubble policy** (task T11): with five agents, ordering between
   simultaneous completions, minimum display time, expiry, and what wins when
   a celebration collides with an unresolved prompt. Also: a *fresh* snapshot
   reporting `unknown` or a Herdr outage never trips transport staleness, so
   NO SIGNAL alone does not cover it.
-- **Source-age checking** (task T12): `stale()` is `millis() -
-  g_lastFrameMs`, time since *receipt*. Flushing buffered frames after a
-  serial outage would make Bruno look current over a dead relay.
-- **Independent message fetch** (task T8): `_fetch_prompts()` reads
+- ~~**Source-age checking** (task T12)~~ **Done** in `bruno.py`: frames
+  carry an absolute UTC `ts`, and anything past 30 seconds - the device's own
+  staleness threshold - is dropped rather than forwarded. An unknown or
+  malformed timestamp is deliberately NOT treated as stale, so one format
+  change cannot silently blank the screen.
+- ~~**Independent message fetch** (task T8)~~ **Done**, and the timing
+  worry dissolved rather than needing a rule: the bleat comes from the
+  snapshot, so a slow read delays the speech bubble and not the celebration.
+  The prompt side is unchanged and still carries the exposure described
+  below. Original note: `_fetch_prompts()` reads
   sequentially inside `refresh()` and each CLI call has a 15s timeout
   (`herdr.py:27`), so five slow reads can stall publication about 75s.
   Copying that pattern for messages doubles the exposure. `state_change_seq`
@@ -703,6 +713,114 @@ Conflict flags:
 - **Lanes A and B both live under `plugin/`** but touch disjoint files
   (`runner.py`/`publish.py`/`frame.py` versus `bruno.py`/`serialport.py`). Low
   risk, but T5 imports T7's helper, so B's internal order matters.
+
+---
+
+## The stream contract (T13)
+
+Written once the follower existed, because several of these answers were only
+obvious with the code in front of me.
+
+`$HERDR_PLUGIN_STATE_DIR/frames.ndjson`. One JSON frame per line, UTF-8,
+newline-terminated. Anyone may read it; the relay never learns who does.
+
+### What appears on it
+
+Only `snap` and `said`. The allowlist is in `plugin/shepherd/publish.py` and
+it is a security boundary, not tidiness: the relay also sends a `key` frame
+carrying the new shared secret as plain hex, and teeing "everything sent"
+would write that secret into a world-readable file. A frame type not on the
+allowlist is invisible to subscribers until someone deliberately adds it, so
+the failure mode of forgetting is a missing feature rather than a leak.
+
+Both guards exist and neither is a substitute for the other: the publisher
+refuses to write a `key` frame, and `bruno.py` refuses to forward one it reads.
+The second matters because a file can be edited by hand.
+
+| Field | On | Meaning |
+|---|---|---|
+| `t` | both | `snap` or `said`. One value, one meaning. |
+| `v` | both | Protocol version. A subscriber that does not recognise it must refuse the frame, not guess. |
+| `ts` | both | When the relay built it. Absolute, UTC, `%Y-%m-%dT%H:%M:%SZ`. |
+| `a` | `snap` | The herd, ordered with whoever is waiting on you first. |
+| `i` | `said` | The pane that finished. |
+| `b` | `said` | What it last said, at most `SAID_MAX` characters, or empty. |
+
+`v` is the contract's version and additive fields do not move it. A subscriber
+must ignore fields it does not know - that is what lets `said` gain `ts`, as
+it just did, without breaking anything reading it.
+
+### Where a subscriber starts
+
+**At the end of the file.** Not the beginning, and this is a real trade rather
+than an oversight: a subscriber joining mid-session would otherwise replay
+hours of history, and every frame of it is superseded by the next `snap`
+anyway. The cost is that completions from before the subscriber started are
+never seen.
+
+That is the right way round for a desk toy. If some future subscriber needs
+history, it should track its own offset in its own state file and seek to it -
+the stream is append-only precisely so that is possible.
+
+### Delivery: what is and is not promised
+
+**Not promised: that every announcement reaches every subscriber.** Saying
+"announcements are never coalesced" is a statement about one batch inside one
+follower, not a delivery guarantee, and the plan review was right to call that
+out. Three things can legitimately lose one:
+
+- The subscriber was not running. Frames are published regardless; nobody
+  replays them.
+- The announcement was older than the subscriber's freshness rule by the time
+  it was read. `bruno.py` drops anything past 30 seconds, matching the
+  device's own staleness threshold, because an hour-old "agent finished" is a
+  recording rather than news.
+- Rotation moved a file with unread lines in it. Bounded, not eliminated: one
+  archive is kept, so a subscriber has a full cap's worth of slack, and at
+  realistic sizes that is hours.
+
+**Promised: no torn frames, and no duplicates from following.** A follower
+holds an incomplete trailing line until the rest arrives, and advances its
+offset only past what it emitted. A rotation is detected by the file's
+identity changing rather than by its size, so the two ways a byte-offset
+follower normally goes wrong - silently duplicating after a truncate, silently
+skipping after an unnoticed rename - are both closed.
+
+Duplicates from the RELAY are a different matter and also excluded: an
+announcement is published once per (pane, `state_change_seq`), so an agent
+that finishes, works, and finishes again produces two, and one that merely
+sits in `done` produces one.
+
+### Retention
+
+Rotate at **2MB**, keep one archive as `frames.ndjson.1`, so the stream costs
+at most 4MB on disk. At the 10 second keepalive floor the relay publishes at
+least six frames a minute, which is roughly 9MB a day at realistic frame
+sizes - so a cap is about five hours of history. More than any subscriber
+needs and small enough that nobody notices it.
+
+Rotation is rename-and-reopen rather than truncate-in-place, and it is allowed
+to fail. On Windows a rename is refused while any process holds the file open
+(`PermissionError: [WinError 32]` - verified, and Python cannot ask for
+delete-sharing), so the writer holds no handle between appends and retries on
+the next publish. Frames are never dropped to force a rotation through. A
+rotation still stuck past twice the cap says so once, and names the likely
+cause: a subscriber holding the file open instead of closing between polls.
+
+**The live file can be legitimately absent.** Rotation happens immediately
+after the write that crosses the cap, so there is a window in which only
+`frames.ndjson.1` exists. A subscriber must treat a missing file as "wait",
+not as an error.
+
+### What a subscriber owes
+
+- Open, seek, read, **close** on each poll. Holding the handle breaks the
+  writer's rotation, which is what keeps the file bounded.
+- Read `ts` and decide for itself what counts as current. The relay publishes
+  history without comment; it is not the relay's job to know how long a
+  subscriber was away.
+- Ignore unknown `t` values and unknown fields.
+- Never write to the file.
 
 ## GSTACK REVIEW REPORT
 

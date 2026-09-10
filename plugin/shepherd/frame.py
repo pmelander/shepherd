@@ -386,8 +386,7 @@ class FrameBuilder:
         """
         return {"t": "deet", "v": PROTOCOL_VERSION, "i": pane_id, "b": body}
 
-    @staticmethod
-    def said_frame(pane_id: str, text: str) -> dict:
+    def said_frame(self, pane_id: str, text: str) -> dict:
         """What one agent said as it finished. Published, never sent by BLE.
 
         A separate frame type from `deet` on purpose, and the reason is worth
@@ -407,6 +406,13 @@ class FrameBuilder:
         return {
             "t": "said",
             "v": PROTOCOL_VERSION,
+            # When it was published, absolute and UTC, same as a snapshot's.
+            # A subscriber needs it to tell news from history: reconnect after
+            # an outage and the file holds every announcement made while you
+            # were away, and replaying an hour-old "agent finished" is not an
+            # announcement, it is a recording. The device parser ignores this
+            # field; the follower is what reads it.
+            "ts": iso(self.now()),
             "i": pane_id,
             # truncate_body keeps the END, which is the right half of an
             # answer: it opens with what the agent did and closes with what

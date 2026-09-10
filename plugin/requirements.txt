@@ -14,15 +14,16 @@
 # note in shepherd/transport.py.
 bleak>=3.0.2
 
+# Needed only by Bruno, the desk companion, and listed anyway.
+#
+# `serial` is imported lazily inside shepherd/serialport.py, and bruno.py
+# exits before touching a port when there is no `bruno.port` file - so a
+# Shepherd-only install never executes an import of this and would run
+# perfectly well without it. Requiring it regardless is the kinder trade:
+# pyserial is small and pure Python, and the alternative is a plugin that
+# starts fine for months and then fails with ImportError the first time
+# somebody plugs in a board.
+pyserial>=3.5
+
 # NOT listed here on purpose:
-#   pyserial  - shepherd/serialport.py is in this package and does use it, but
-#               it imports `serial` lazily INSIDE its functions, and the BLE
-#               relay never calls them. So a machine with no Bruno hardware
-#               needs no pyserial to run the relay, and must not be told
-#               otherwise. Same idiom as singleton.py importing msvcrt or
-#               fcntl inside the function that needs it. pyserial moves into
-#               this file when plugin/bruno.py lands (review task T5) and the
-#               dependency becomes real at startup. It is in
-#               ../requirements-dev.txt today, which is what the firmware
-#               probe tools need.
 #   pytest    - a contributor dependency, see ../requirements-dev.txt.

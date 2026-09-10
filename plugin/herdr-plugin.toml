@@ -36,6 +36,30 @@ platforms = ["windows"]
 [[startup]]
 command = ["py", "-3", "start.py", "--mode", "startup"]
 
+# Bruno, the desk companion. A second startup entry rather than something
+# start.py spawns, so a failure in one cannot take the other down.
+#
+# This costs an install with no Bruno hardware exactly one process start per
+# Herdr session and nothing after it. bruno.py's first act is to look for
+# `bruno.port` in this plugin's CONFIG directory; absent, it logs one line and
+# exits 0 - no retry loop, no log noise, no held port. Creating that file is
+# the whole opt-in and deleting it is the whole off switch:
+#
+#   herdr plugin config-dir shepherd
+#   echo COM7 > "%APPDATA%\herdr\plugins\config\shepherd\bruno.port"
+#
+# An empty file means "find the board yourself".
+#
+# UNVERIFIED, and worth knowing before debugging something else: whether Herdr
+# fires BOTH startup entries. The manifest is documented as array-of-tables,
+# so plural is the intended shape, but this has not been run against a live
+# session with two entries. If only the first fires, the fallback is for
+# start.py to spawn bruno.py as a child when the port file exists - at the
+# cost of the isolation above. Confirm with `herdr plugin log list --plugin
+# shepherd` after a session start: two processes, two log streams.
+[[startup]]
+command = ["py", "-3", "bruno.py"]
+
 # Print the PlatformIO flag that pairs this relay's secret with a firmware
 # build, generating the secret on first run. An action rather than a README
 # paragraph because resolving the config directory by hand is how you end up
