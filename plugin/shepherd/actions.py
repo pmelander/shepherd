@@ -41,8 +41,7 @@ import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from collections import deque
-from typing import Callable, Deque, Mapping
+from typing import Callable, Mapping
 
 from .auth import verify as verify_mac
 from .herdr import HerdrError, HerdrSource
@@ -56,6 +55,17 @@ from .prompt import (
     plan_deny,
 )
 from .recap import extract_answer
+
+
+# How long after a frame was sent an action signed against it is still
+# honoured. Long enough to pick the device up, read a question and decide -
+# that is the whole point of a glance device - and short enough that a frame
+# captured off the air is not useful for the rest of the afternoon.
+FRAME_TS_WINDOW = 300.0
+
+# Belt and braces on memory. At one frame a second the window alone bounds
+# this at about 300 entries; this caps it if the clock misbehaves.
+MAX_TRACKED_FRAMES = 512
 
 
 class Action(enum.Enum):
@@ -216,10 +226,22 @@ class ActionGate:
     _allowed: frozenset[str] = field(default_factory=frozenset, init=False)
     _pending: dict[str, PendingDecision] = field(default_factory=dict, init=False)
     _burned: set[str] = field(default_factory=set, init=False)
-    # A few frames' worth of timestamps. More than one because a thumb is
-    # slower than a keepalive: answering a question you have been reading for
-    # fifteen seconds must still work.
-    _recent_ts: Deque[str] = field(default_factory=lambda: deque(maxlen=6), init=False)
+    # Timestamps of frames actually sent, and when each was sent. An action
+    # must name one of these, and one still inside the window.
+    #
+    # This used to be deque(maxlen=6), and the bug was that six FRAMES is not
+    # a duration. Idle, frames go out every keepalive and six of them is about
+    # a minute. Busy, the relay rebuilds whenever the herd moves - up to once
+    # a second - so the window collapsed to about six seconds. The harder the
+    # agents worked, the less time there was to read a question and answer it,
+    # which is exactly backwards, and it presented as an action refused at
+    # random. Seen live: "action detail wQ:p1 -> refused (signed against a
+    # frame we no longer recognise)".
+    #
+    # Measured on a clock instead. Replay protection is unchanged in kind - a
+    # captured frame still expires - it just expires in the reader's time
+    # rather than the herd's.
+    _seen_ts: dict[str, datetime] = field(default_factory=dict, init=False)
 
     # -- state kept in step with what the device is showing ----------------
 
@@ -235,8 +257,26 @@ class ActionGate:
         """
         self._allowed = frozenset(p for p in pane_ids if is_pane_id(p))
         self._pending = dict(pending)
-        if ts and ts not in self._recent_ts:
-            self._recent_ts.append(ts)
+        if ts:
+            now = self.now()
+            self._seen_ts.setdefault(ts, now)
+            self._prune(now)
+
+    def _prune(self, now: datetime) -> None:
+        """Forget frames outside the window, so this stays bounded.
+
+        The deque's maxlen used to do this for free. Age does it now, plus a
+        hard cap: a clock that jumps backwards would otherwise stop anything
+        ageing out at all, and an unbounded dict on a long-running relay is
+        not a trade worth making for a diagnostic nobody reads.
+        """
+        stale = [ts for ts, at in self._seen_ts.items()
+                 if not 0 <= (now - at).total_seconds() <= FRAME_TS_WINDOW]
+        for ts in stale:
+            del self._seen_ts[ts]
+        while len(self._seen_ts) > MAX_TRACKED_FRAMES:
+            # dicts keep insertion order, so this drops the oldest.
+            del self._seen_ts[next(iter(self._seen_ts))]
 
     # -- dispatch ----------------------------------------------------------
 
@@ -245,10 +285,17 @@ class ActionGate:
             return None
         if not req.mac or not req.ts:
             return Refusal.UNSIGNED
-        if req.ts not in self._recent_ts:
+        sent_at = self._seen_ts.get(req.ts)
+        if sent_at is None:
             # Binding to a frame we actually sent is what stops a captured
             # frame being replayed later. It is the only replay protection
             # `focus` has, since it carries no decision id.
+            return Refusal.STALE_TS
+        age = (self.now() - sent_at).total_seconds()
+        if not 0 <= age <= FRAME_TS_WINDOW:
+            # Negative means the clock went backwards; refusing is the safe
+            # side of that, and a new frame restores service within a
+            # keepalive.
             return Refusal.STALE_TS
         if not verify_mac(self.secret, req.mac, req.ts, req.pane_id,
                           req.action.value, req.decision_id, req.choice):

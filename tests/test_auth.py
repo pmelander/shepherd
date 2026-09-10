@@ -13,6 +13,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugin"))
 
@@ -251,13 +252,109 @@ def test_a_thumb_slower_than_a_keepalive_still_works(tmp_path):
     assert res.ok, "answering the frame you were reading must not race the keepalive"
 
 
+class MovableClock:
+    """A clock the test advances, so the window can be walked past."""
+
+    def __init__(self, start=None):
+        self.t = start or datetime(2026, 9, 10, 12, 0, 0, tzinfo=timezone.utc)
+
+    def __call__(self):
+        return self.t
+
+    def advance(self, seconds):
+        self.t += timedelta(seconds=seconds)
+
+
+def timed_gate(tmp_path, src, clock, ts="t0", decision="abc123"):
+    g = ActionGate(source=src, audit=tmp_path / "a.jsonl", secret=SECRET,
+                   now=clock)
+    g.observe_frame(
+        frozenset({"w9:p1", "w2:p1"}),
+        {decision: PendingDecision("w9:p1", fingerprint(BASH_PROMPT), False)},
+        ts=ts,
+    )
+    return g
+
+
 def test_very_old_frames_eventually_stop_being_answerable(tmp_path):
+    # Still true, and now it is about time rather than about how many frames
+    # happened to go out in the meantime.
+    from shepherd.actions import FRAME_TS_WINDOW
+
     src = FakeSource()
-    g = gate(tmp_path, src, ts="t0")
-    for t in [f"t{i}" for i in range(1, 12)]:
-        g.observe_frame(frozenset({"w9:p1"}), {}, ts=t)
+    clock = MovableClock()
+    g = timed_gate(tmp_path, src, clock)
+    clock.advance(FRAME_TS_WINDOW + 1)
     res = run(g.dispatch(signed(ts="t0")))
     assert not res.ok and Refusal.STALE_TS.value in res.reason
+
+
+def test_a_busy_herd_does_not_shrink_the_window(tmp_path):
+    # THE regression test, from a real refusal in the plugin log:
+    #   action detail wQ:p1 -> refused (signed against a frame we no longer
+    #   recognise)
+    # The window was six FRAMES, and a busy relay rebuilds up to once a
+    # second, so it collapsed to about six seconds - the harder the agents
+    # worked, the less time there was to answer. Fifty frames go out here in
+    # ten seconds and the one being read must still be answerable.
+    src = FakeSource()
+    clock = MovableClock()
+    g = timed_gate(tmp_path, src, clock)
+    for i in range(50):
+        clock.advance(0.2)
+        g.observe_frame(frozenset({"w9:p1"}),
+                        {"abc123": PendingDecision(
+                            "w9:p1", fingerprint(BASH_PROMPT), False)},
+                        ts=f"busy{i}")
+    res = run(g.dispatch(signed(ts="t0")))
+    assert res.ok, ("fifty frames in ten seconds aged out the frame being "
+                    "read; the window is coupled to herd activity again")
+
+
+def test_a_frame_just_inside_the_window_is_answerable(tmp_path):
+    from shepherd.actions import FRAME_TS_WINDOW
+
+    src = FakeSource()
+    clock = MovableClock()
+    g = timed_gate(tmp_path, src, clock)
+    clock.advance(FRAME_TS_WINDOW - 1)
+    assert run(g.dispatch(signed(ts="t0"))).ok
+
+
+def test_a_backwards_clock_refuses_rather_than_accepting_forever(tmp_path):
+    # A negative age must not read as "young". Refusing is the safe side, and
+    # the next frame restores service within a keepalive.
+    src = FakeSource()
+    clock = MovableClock()
+    g = timed_gate(tmp_path, src, clock)
+    clock.advance(-3600)
+    res = run(g.dispatch(signed(ts="t0")))
+    assert not res.ok and Refusal.STALE_TS.value in res.reason
+
+
+def test_the_tracked_set_stays_bounded(tmp_path):
+    # The deque's maxlen used to bound this for free.
+    from shepherd.actions import MAX_TRACKED_FRAMES
+
+    src = FakeSource()
+    clock = MovableClock()
+    g = timed_gate(tmp_path, src, clock)
+    for i in range(MAX_TRACKED_FRAMES + 200):
+        g.observe_frame(frozenset({"w9:p1"}), {}, ts=f"f{i}")
+    assert len(g._seen_ts) <= MAX_TRACKED_FRAMES
+
+
+def test_frames_outside_the_window_are_forgotten_not_just_refused(tmp_path):
+    from shepherd.actions import FRAME_TS_WINDOW
+
+    src = FakeSource()
+    clock = MovableClock()
+    g = timed_gate(tmp_path, src, clock)
+    assert "t0" in g._seen_ts
+    clock.advance(FRAME_TS_WINDOW + 1)
+    g.observe_frame(frozenset({"w9:p1"}), {}, ts="t1")
+    assert "t0" not in g._seen_ts, "an expired frame was kept forever"
+    assert "t1" in g._seen_ts
 
 
 def test_verification_happens_before_the_pane_is_read(tmp_path):

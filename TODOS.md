@@ -46,10 +46,14 @@ exposure is an active MITM present at the moment of rotation - who would have ha
 to MITM the original pairing too. And a factory reset drops back to the build-time
 key by design, so a rotated pair needs rotating again afterwards.
 
-Left over: `firmware/secret.ini` still holds the *original* key, so a reflash
-reverts the device while the relay keeps the rotated one. `start.py --secret-flag`
-prints the current value to paste back. Worth automating if rotation becomes
-routine rather than occasional.
+~~Left over: `firmware/secret.ini` still holds the *original* key~~ **Fixed
+2026-09-10**, and it had teeth: a fingerprint comparison before a planned
+flash showed the baked key and the relay's key differed, so flashing would
+have produced exactly the symptom described above - pairs, connects, draws the
+herd perfectly, refuses every action. `secret.ini` now carries the rotated
+key. Still worth automating if rotation becomes routine: the check is four
+lines (hash both, compare) and belongs in the build, because the failure is
+silent until you press a key.
 
 ### ~~Key lock / screen-off state for pocket carry~~ — DONE
 
