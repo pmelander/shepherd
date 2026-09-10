@@ -556,15 +556,23 @@ Not decisions left open, but text the plan does not yet contain:
   completion, so the fetch must be able to return nothing and still let Bruno
   celebrate.
 
-### One assumption still unverified
+### The last assumption, now verified
 
-Two `[[startup]]` entries in one `herdr-plugin.toml`. The manifest is
-documented as array-of-tables, so plural is the intended shape and this is
-probably fine - confidence 7/10, not 10, because verifying it means linking a
-probe plugin into the live Herdr hosting five work agents. Confirm it on the
-bench alongside the hardware probes. Fallback if it turns out to be
-single-only: `start.py` spawns `bruno.py` as a child when the port file
-exists.
+~~Two `[[startup]]` entries in one `herdr-plugin.toml`.~~ **Confirmed
+2026-09-10**, and not by me: a live server restart fired both hooks, and
+`herdr plugin log list --plugin shepherd` showed two streams from the same
+second - `start.py` running, `bruno.py` started and exited 0 a second later
+because no `bruno.port` file existed. So the isolation the two entries buy is
+real, `bruno.py`'s opt-out has been exercised by Herdr rather than by hand,
+and the written-down fallback is not needed.
+
+Worth keeping the method rather than the answer: this was flagged at 7/10
+rather than asserted, because checking it meant starting a Herdr session next
+to five working agents. It cost nothing to leave flagged, and it was answered
+for free by a restart that was going to happen anyway. Also settled at the
+same time, and the reason a restart was needed at all: startup hooks fire on
+SESSION start, so restarting the client changes nothing, and neither do
+`plugin disable`/`enable` or `server reload-config`.
 
 ## NOT in scope
 

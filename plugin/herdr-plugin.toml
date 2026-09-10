@@ -50,13 +50,15 @@ command = ["py", "-3", "start.py", "--mode", "startup"]
 #
 # An empty file means "find the board yourself".
 #
-# UNVERIFIED, and worth knowing before debugging something else: whether Herdr
-# fires BOTH startup entries. The manifest is documented as array-of-tables,
-# so plural is the intended shape, but this has not been run against a live
-# session with two entries. If only the first fires, the fallback is for
-# start.py to spawn bruno.py as a child when the port file exists - at the
-# cost of the isolation above. Confirm with `herdr plugin log list --plugin
-# shepherd` after a session start: two processes, two log streams.
+# VERIFIED 2026-09-10 on a live session restart: Herdr fires BOTH startup
+# entries. `herdr plugin log list --plugin shepherd` showed two log streams
+# from the same second - start.py still running, and bruno.py started and
+# exited 0 one second later because no bruno.port file existed. So the
+# isolation above is real, and the fallback that was written down here (having
+# start.py spawn bruno.py as a child) is not needed.
+#
+# That single log line is also the cheapest health check for this pair: two
+# entries after a session start means both hooks ran.
 [[startup]]
 command = ["py", "-3", "bruno.py"]
 
