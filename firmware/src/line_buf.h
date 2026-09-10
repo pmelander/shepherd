@@ -8,8 +8,10 @@
 //
 // What was wrong: the buffer was too small, twice over. `_usbLine` held 1024
 // bytes and `_btLine` 4096, while the largest frame the host can actually
-// emit is 6317 - measured by building it with the real FrameBuilder, not
-// estimated. An over-long line was silently truncated and the truncated JSON
+// emit is SHEPHERD_WORST_FRAME below - measured by building it with the real
+// FrameBuilder, not estimated. (This paragraph said 6317 until the test that
+// pins it was made adversarial enough to reach 6449. Naming the constant
+// rather than repeating its value is the fix for that.) An over-long line was silently truncated and the truncated JSON
 // was then handed to the parser, which rejected it as somebody else's frame.
 // So the failure mode was a screen that simply stopped updating, with nothing
 // logged, nothing on screen, and nothing to point at. The device looked calm
