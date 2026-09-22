@@ -134,18 +134,29 @@ void drawClouds() {
 // It survives the cloud tick for free - drawClouds() repaints y 0..30 and
 // stops above this - so it costs nothing per frame and is drawn only when
 // the whole scene is.
+//
+// Yellowtail is a brush script, which is the closest thing M5GFX ships to a
+// name painted on a farm gate. Drawn at its NATIVE 32, not scaled up from
+// the block font: LovyanGFX scales glyphs nearest-neighbour, and a script's
+// thin stroke ends are exactly what that ruins. Its 45px line height is
+// near enough three times the 16px it replaces to be what was asked for,
+// and 38+45 still lands inside the bubble's 28..102 with room to spare.
 constexpr int kNameY = 38;
 
 void drawName() {
   // One-argument setTextColor sets fore == back, which LovyanGFX reads as
   // "do not fill the background" (lgfx_fonts.inl: fillbg = back != fore). It
   // has to: a flat fill here would stamp a rectangle across a gradient.
+  M5.Display.setFont(&fonts::Yellowtail_32);
   M5.Display.setTextDatum(top_center);
   M5.Display.setTextColor(C_NAME);
-  M5.Display.setTextSize(2);
-  M5.Display.drawString("Bruno", M5.Display.width() / 2, kNameY);
-  M5.Display.setTextDatum(top_left);
   M5.Display.setTextSize(1);
+  M5.Display.drawString("Bruno", M5.Display.width() / 2, kNameY);
+  // Put the block font back. Everything after this - the bubble, the strip -
+  // calls drawString without setting a font, so leaving Yellowtail installed
+  // would quietly redraw the whole UI in brush script.
+  M5.Display.setFont(&fonts::Font0);
+  M5.Display.setTextDatum(top_left);
 }
 
 // The box he occupies, generously. Animating repaints only this, because a
