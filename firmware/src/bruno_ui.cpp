@@ -46,6 +46,7 @@ constexpr uint16_t C_CLOUD_S = 0xE75E;   // its underside
 constexpr uint16_t C_HILL_FAR = 0x5D48;  // sunlit, further off
 constexpr uint16_t C_HILL_MID = 0x3C66;
 constexpr uint16_t C_GRASS    = 0x2B65;  // the field he stands in
+constexpr uint16_t C_NAME     = 0x4962;  // his name, burnt-wood brown
 
 constexpr uint16_t C_WOOL    = 0xEF7D;   // warm off-white
 constexpr uint16_t C_WOOL_SH = 0xB596;   // its shadow
@@ -123,6 +124,30 @@ void drawClouds() {
   drawCloud(((g_drift * 2 / 3 + 170) % (w + 80)) - 40, 10, 9);
 }
 
+// His name, in the sky just under the clouds.
+//
+// Sitting INSIDE the bubble's footprint (y 28..102) is the point, not an
+// oversight: when he has something to say, the words take the space and the
+// nameplate goes. A screen that is telling you an agent finished should not
+// also be introducing itself.
+//
+// It survives the cloud tick for free - drawClouds() repaints y 0..30 and
+// stops above this - so it costs nothing per frame and is drawn only when
+// the whole scene is.
+constexpr int kNameY = 38;
+
+void drawName() {
+  // One-argument setTextColor sets fore == back, which LovyanGFX reads as
+  // "do not fill the background" (lgfx_fonts.inl: fillbg = back != fore). It
+  // has to: a flat fill here would stamp a rectangle across a gradient.
+  M5.Display.setTextDatum(top_center);
+  M5.Display.setTextColor(C_NAME);
+  M5.Display.setTextSize(2);
+  M5.Display.drawString("Bruno", M5.Display.width() / 2, kNameY);
+  M5.Display.setTextDatum(top_left);
+  M5.Display.setTextSize(1);
+}
+
 // The box he occupies, generously. Animating repaints only this, because a
 // full 320x240 redraw five times a second is how a calm pet turns into a
 // flickering fault.
@@ -134,6 +159,7 @@ void drawScene() {
   const int w = M5.Display.width(), h = M5.Display.height();
   skyBand(0, kHorizon);
   drawClouds();
+  drawName();
 
   // Rolling pasture: overlapping ellipses, furthest and palest first.
   M5.Display.fillEllipse(w / 4, kHorizon + 26, w / 2 + 30, 34, C_HILL_FAR);
