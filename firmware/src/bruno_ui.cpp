@@ -4,14 +4,21 @@
 // decides anything - bruno_view.h has already worked out the mood, whose news
 // it is and what the bubble says, and this turns that into pixels.
 //
-// Two notes on how rather than what.
+// Three notes on how rather than what.
 //
-// It redraws only on CHANGE. The loop calls this at 2Hz and a full 320x240
-// repaint every half second makes a desk toy flicker like a fault rather than
-// sit there being alive. The mood, the pane and the text are compared against
-// what is already on screen; the "alive" tick is the only thing that moves
-// unconditionally, because a frozen device and a quiet one have to be
-// distinguishable from across the room.
+// The whole SCREEN is redrawn only when the herd changes. The loop calls this
+// at ~15Hz and a full 320x240 repaint at that rate makes a desk toy flicker
+// like a fault rather than sit there being alive.
+//
+// HE is redrawn much more often, in a 108x96 patch, because a pet that only
+// moves when an agent finishes is a picture of a pet. The nod, the blink and
+// the occasional mouthful of grass all happen on the early-return path where
+// nothing about the herd has changed at all.
+//
+// The animation is timed in MILLISECONDS, not frames. Counting frames makes
+// the frame rate a secret parameter of every behaviour, so raising it speeds
+// him up like a wind-up toy; on a clock he grazes for the same four seconds
+// whatever the rate.
 //
 // There is no sheep in `src/buddies/`. Twenty species were vendored with the
 // fork - axolotl through turtle - and not one of them is a sheep, so Bruno is
@@ -113,6 +120,13 @@ void drawClouds() {
   drawCloud(((g_drift * 2 / 3 + 170) % (w + 80)) - 40, 10, 9);
 }
 
+// The box he occupies, generously. Animating repaints only this, because a
+// full 320x240 redraw five times a second is how a calm pet turns into a
+// flickering fault.
+constexpr int kSheepBoxY0 = 112, kSheepBoxY1 = 208;
+int sheepBoxX0() { return sheepCx() - 52; }
+constexpr int kSheepBoxW = 108;
+
 void drawScene() {
   const int w = M5.Display.width(), h = M5.Display.height();
   skyBand(0, kHorizon);
@@ -138,15 +152,20 @@ uint16_t moodColour(BrunoMood m) {
 
 // ------------------------------------------------------------------- sheep
 
-void drawSheep(int cx, int cy, BrunoMood mood) {
-  const bool asleep = mood == BRUNO_MOOD_POTTER;
-  const bool alarmed = mood == BRUNO_MOOD_ATTENTION;
-  const bool happy = mood == BRUNO_MOOD_CELEBRATE;
+// How he is standing this instant, as opposed to what mood he is in. Split
+// out so the animation can move him without the mood changing - which is the
+// whole point: the herd can be quiet for an hour and he still has to look
+// like something that is alive rather than a drawing of a sheep.
+struct SheepPose {
+  int lift;        // off the ground, for celebrating
+  int headDy;      // 0 grazing-height ... negative is head up
+  bool eyesShut;   // a blink, or grazing
+  bool earsUp;
+};
 
-  // Celebrating lifts him a little off the ground. It is the cheapest
-  // possible "jumping for joy" and reads instantly from across a desk.
-  const int lift = happy ? 6 : 0;
-  const int by = cy - lift;
+void drawSheep(int cx, int cy, BrunoMood mood, const SheepPose& p) {
+  const bool alarmed = p.earsUp;
+  const int by = cy - p.lift;
 
   // Legs first, so the body sits over them.
   for (int i = 0; i < 4; i++) {
@@ -161,9 +180,12 @@ void drawSheep(int cx, int cy, BrunoMood mood) {
   M5.Display.fillCircle(cx + 12, by - 4, 17, C_WOOL);
   M5.Display.fillCircle(cx - 24, by - 2, 16, C_WOOL);
 
-  // Head, turned to the right, dropped to the grass when pottering.
-  const int hx = cx + 34;
-  const int hy = by + (asleep ? 14 : -6);
+  // Head, turned to the right. headDy is where the animation lives: it nods
+  // gently while he is standing and drops to the grass when he grazes.
+  const int hx = cx + kHeadDx;
+  const int hy = by - 6 + p.headDy;
+  // A neck, so the head does not detach from the body when it drops.
+  M5.Display.fillEllipse(hx - 12, (by - 6 + hy) / 2, 8, 11, C_WOOL);
   M5.Display.fillEllipse(hx, hy, 13, 11, C_FACE);
   // Ears. Up and forward when something wants attention.
   M5.Display.fillEllipse(hx - 9, hy - (alarmed ? 12 : 8), 4, alarmed ? 8 : 5,
@@ -171,8 +193,7 @@ void drawSheep(int cx, int cy, BrunoMood mood) {
   M5.Display.fillEllipse(hx + 7, hy - (alarmed ? 12 : 8), 4, alarmed ? 8 : 5,
                          C_FACE);
 
-  // Eyes. Closed when pottering, wide when alarmed.
-  if (asleep) {
+  if (p.eyesShut) {
     M5.Display.drawFastHLine(hx - 6, hy - 1, 6, C_WOOL);
     M5.Display.drawFastHLine(hx + 2, hy - 1, 6, C_WOOL);
   } else {
@@ -180,6 +201,113 @@ void drawSheep(int cx, int cy, BrunoMood mood) {
     M5.Display.fillCircle(hx - 4, hy - 2, r, C_WOOL);
     M5.Display.fillCircle(hx + 5, hy - 2, r, C_WOOL);
   }
+  (void)mood;
+}
+
+// ---------------------------------------------------------------- aliveness
+
+// Everything that makes him move. Driven at 5Hz from brunoUiDraw, which is
+// called on a timer and returns early when the VIEW has not changed - so this
+// is what happens on all those early returns, and it is the difference
+// between a pet and a picture of one.
+//
+// He only potters when nothing wants you. Grazing contentedly in front of a
+// blocked agent would undercut the whole attention rule, so ATTENTION gets a
+// still, ears-up sheep and nothing else.
+// Everything below is in MILLISECONDS rather than in frames. The first
+// version counted ticks, which meant the nod, the blink and the grazing were
+// all secretly defined by the draw rate - so raising the frame rate sped him
+// up like a wind-up toy and every constant needed retuning. On a clock, the
+// frame rate is free to change and he still grazes for the same four seconds.
+constexpr uint32_t kNodStepMs   = 110;               // one step of the nod
+constexpr uint32_t kGrazeMinMs  = 2500, kGrazeVarMs = 3500;
+constexpr uint32_t kGapMinMs    = 9000, kGapVarMs   = 16000;
+constexpr uint32_t kBlinkMs     = 120;
+constexpr uint32_t kBlinkGapMin = 2500, kBlinkGapVar = 9000;
+constexpr uint32_t kBounceMs    = 90;                // celebration bounce step
+
+uint32_t g_now = 0;
+bool g_grazing = false;
+uint32_t g_grazeEnds = 0;
+uint32_t g_nextGraze = 6000;
+uint32_t g_blinkEnds = 0;
+uint32_t g_nextBlink = 4000;
+
+SheepPose poseFor(BrunoMood mood) {
+  SheepPose p{};
+  p.earsUp = (mood == BRUNO_MOOD_ATTENTION);
+
+  if (mood == BRUNO_MOOD_CELEBRATE) {
+    // A real bounce, eight steps of it, so he springs rather than blinking
+    // between two heights.
+    static const int kBounce[8] = {0, 5, 9, 11, 11, 9, 5, 1};
+    p.lift = kBounce[(g_now / kBounceMs) % 8];
+    p.headDy = -5;
+    return p;
+  }
+  if (mood == BRUNO_MOOD_ATTENTION) {
+    p.headDy = -8;                     // head up, watching, dead still
+    return p;
+  }
+
+  // Idle and busy: a slow nod over about a second, with a pause at each end
+  // so it breathes instead of oscillating.
+  static const int kNod[10] = {0, -1, -2, -3, -3, -3, -2, -1, 0, 0};
+  p.headDy = kNod[(g_now / kNodStepMs) % 10];
+  if (g_grazing) {
+    p.headDy = 22;                     // down in the grass
+    p.eyesShut = true;
+  } else {
+    p.eyesShut = g_now < g_blinkEnds;
+  }
+  return p;
+}
+
+void advanceAnimation(BrunoMood mood, uint32_t now) {
+  g_now = now;
+  const bool canPotter = (mood == BRUNO_MOOD_POTTER || mood == BRUNO_MOOD_BUSY);
+
+  if (!canPotter) {
+    // He does not graze while something wants you. Contented munching in
+    // front of a blocked agent would undercut the whole attention rule.
+    g_grazing = false;
+    g_nextGraze = now + kGapMinMs + (uint32_t)random(kGapVarMs);
+    return;
+  }
+  if (g_grazing) {
+    if ((int32_t)(now - g_grazeEnds) >= 0) {
+      g_grazing = false;
+      g_nextGraze = now + kGapMinMs + (uint32_t)random(kGapVarMs);
+    }
+  } else if ((int32_t)(now - g_nextGraze) >= 0) {
+    g_grazing = true;
+    g_grazeEnds = now + kGrazeMinMs + (uint32_t)random(kGrazeVarMs);
+  }
+  if ((int32_t)(now - g_nextBlink) >= 0) {
+    g_blinkEnds = now + kBlinkMs;
+    g_nextBlink = now + kBlinkGapMin + (uint32_t)random(kBlinkGapVar);
+  }
+}
+
+// Repaint his patch of field and then him, so a nodding head does not smear
+// and a dropped one does not leave the old one behind.
+void drawSheepPatch(BrunoMood mood) {
+  M5.Display.setClipRect(sheepBoxX0(), kSheepBoxY0, kSheepBoxW,
+                         kSheepBoxY1 - kSheepBoxY0);
+  // NOT drawScene(). Clipping stops the pixels but not the work: the full
+  // scene issues 168 gradient rows plus the clouds and the sun, all of which
+  // are outside this box, and at fifteen frames a second that is most of the
+  // budget spent on drawing nothing. This draws only what is actually inside
+  // his patch - about fifty sky rows, the hills, and the grass.
+  const int w = M5.Display.width(), h = M5.Display.height();
+  skyBand(kSheepBoxY0, kSheepBoxY1 < kHorizon ? kSheepBoxY1 : kHorizon);
+  M5.Display.fillEllipse(w / 4, kHorizon + 26, w / 2 + 30, 34, C_HILL_FAR);
+  M5.Display.fillEllipse(w - 30, kHorizon + 30, w / 2, 32, C_HILL_FAR);
+  M5.Display.fillEllipse(w / 2 + 40, kHorizon + 34, w / 2, 30, C_HILL_MID);
+  M5.Display.fillRect(0, kHorizon + 22, w, h - kHorizon - 22, C_GRASS);
+  // Feet land IN the grass rather than on the horizon line.
+  drawSheep(sheepCx(), kHorizon - 14, mood, poseFor(mood));
+  M5.Display.clearClipRect();
 }
 
 // ------------------------------------------------------------------ bubble
@@ -314,7 +442,20 @@ void brunoUiDraw(const BrunoView& v) {
                  && v.working == g_lastWorking
                  && v.blocked == g_lastBlocked
                  && v.done == g_lastDone;
-  if (same) return;
+  if (same) {
+    // Nothing about the HERD changed, which is the normal case and used to
+    // mean nothing happened at all. It is where he lives: the nod, the blink,
+    // the occasional mouthful of grass. Only his patch is repainted.
+    if (v.mood == BRUNO_MOOD_STALE || v.mood == BRUNO_MOOD_BAD_VERSION) return;
+    const SheepPose before = poseFor(v.mood);
+    advanceAnimation(v.mood, millis());
+    const SheepPose after = poseFor(v.mood);
+    if (before.lift != after.lift || before.headDy != after.headDy
+        || before.eyesShut != after.eyesShut || before.earsUp != after.earsUp) {
+      drawSheepPatch(v.mood);
+    }
+    return;
+  }
 
   g_lastMood = v.mood;
   strncpy(g_lastPane, v.pane, sizeof(g_lastPane) - 1);
@@ -333,8 +474,7 @@ void brunoUiDraw(const BrunoView& v) {
   M5.Display.setTextSize(1);
 
   drawBubble(v);
-  // Feet land IN the grass rather than on the horizon line.
-  drawSheep(sheepCx(), kHorizon - 14, v.mood);
+  drawSheepPatch(v.mood);
   drawStrip(v);
 }
 

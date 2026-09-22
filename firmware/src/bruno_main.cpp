@@ -333,7 +333,10 @@ void loop() {
   static uint32_t nextDraw = 0;
   const uint32_t now = millis();
   if ((int32_t)(now - nextDraw) >= 0) {
-    nextDraw = now + 200;
+    // ~15fps. brunoUiDraw is a no-op when the herd has not moved AND he is
+    // mid-pose, so this is not fifteen full repaints a second - it is the
+    // rate at which a nod is allowed to look like a nod rather than a jump.
+    nextDraw = now + 66;
     const bool fresh = g_everReceived
                     && (uint32_t)(now - g_lastFrameMs) < BRUNO_STALE_MS;
     brunoDecide(g_frame, g_queue, now, fresh, g_badVersion, &g_view);
