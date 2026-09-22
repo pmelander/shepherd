@@ -444,6 +444,43 @@ def test_frame_age_reads_the_builders_own_format():
     assert B.frame_age(real, NOW + timedelta(seconds=90)) == pytest.approx(90.0)
 
 
+def test_the_run_loop_judges_freshness_on_its_injected_clock(tmp_path, monkeypatch):
+    # The guard against this file rotting again. Bruno must use the clock it
+    # was given, not the wall clock - otherwise any test that stamps a frame
+    # with a literal date passes today and fails next week, and the failure
+    # looks like a regression in code nobody touched.
+    p = tmp_path / "frames.ndjson"
+    p.write_text("", encoding="utf-8")
+    fake = FakeSerial()
+    monkeypatch.setattr(B, "open_port", lambda *a, **k: fake)
+
+    # Constructed so the two clocks DISAGREE, which a weaker version of this
+    # test did not do: a frame stamped in 2020 is ancient by the wall clock
+    # and perfectly fresh to a 2020 clock. Correct code forwards it; code
+    # reaching for datetime.now() drops it as stale.
+    long_ago = datetime(2020, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    stamp = long_ago.strftime("%Y-%m-%dT%H:%M:%SZ")
+    bruno = B.Bruno(port="COM-fake", stream=p, poll_interval=0.01,
+                    now=lambda: long_ago)
+    clock = Clock()
+
+    async def scenario():
+        task = asyncio.create_task(bruno.run(sleep=fake_sleep_for(clock),
+                                             clock=clock))
+        await asyncio.sleep(0)
+        write_lines(p, snap(1, ts=stamp))
+        for _ in range(20):
+            await asyncio.sleep(0)
+        bruno.stop()
+        await task
+
+    run(scenario())
+    assert kinds(fake.written) == ["snap"], (
+        "a frame that is fresh by the injected clock was judged against the "
+        "wall clock instead"
+    )
+
+
 # ================================================== end to end
 
 
@@ -499,7 +536,11 @@ def test_frames_reach_the_port(monkeypatch, tmp_path):
     fake = FakeSerial()
     monkeypatch.setattr(B, "open_port", lambda *a, **k: fake)
 
-    bruno = B.Bruno(port="COM-fake", stream=p, poll_interval=0.01)
+    # now=lambda: NOW so the frames below are judged against the clock they
+    # were stamped with. Using the real clock made this test pass on the day it
+    # was written and fail twelve days later, when its own frames aged out.
+    bruno = B.Bruno(port="COM-fake", stream=p, poll_interval=0.01,
+                    now=lambda: NOW)
     clock = Clock()
 
     async def scenario():
@@ -528,7 +569,8 @@ def test_losing_the_board_mid_write_reconnects(monkeypatch, tmp_path):
         return s
 
     monkeypatch.setattr(B, "open_port", opener)
-    bruno = B.Bruno(port="COM-fake", stream=p, poll_interval=0.01)
+    bruno = B.Bruno(port="COM-fake", stream=p, poll_interval=0.01,
+                    now=lambda: NOW)
     clock = Clock()
 
     async def scenario():

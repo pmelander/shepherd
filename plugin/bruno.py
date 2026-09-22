@@ -67,6 +67,7 @@ import signal
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Callable
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
@@ -75,6 +76,10 @@ from shepherd.publish import STREAM_NAME, default_path  # noqa: E402
 from shepherd.runner import herdr_supervised, herdr_liveness  # noqa: E402
 from shepherd.serialport import candidates, open_port  # noqa: E402
 from shepherd.singleton import AlreadyRunning, acquire  # noqa: E402
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
 
 log = logging.getLogger("bruno")
 
@@ -293,10 +298,18 @@ class Follower:
 
 class Bruno:
     def __init__(self, port: str | None, stream: Path,
-                 poll_interval: float = POLL_INTERVAL) -> None:
+                 poll_interval: float = POLL_INTERVAL,
+                 now: Callable[[], datetime] = _utcnow) -> None:
         self.port = port
         self.follower = Follower(stream)
         self.poll_interval = poll_interval
+        # Injectable for the same reason every other clock in this codebase
+        # is. Without it, a test has to pin frame timestamps to a literal
+        # date and compare them against the real one - which passes on the
+        # day it is written and silently starts failing later. That happened:
+        # two tests here went red twelve days after they were written, and
+        # the frames they built were being correctly discarded as stale.
+        self.now = now
         self._stop = False
         self._serial = None
         self._unreachable_since: float | None = None
@@ -354,7 +367,7 @@ class Bruno:
 
             lines = self.follower.poll()
             if lines:
-                payloads, dropped = select(lines, datetime.now(timezone.utc))
+                payloads, dropped = select(lines, self.now())
                 if not await self._write(payloads):
                     continue
                 _log_drops(dropped, len(lines))

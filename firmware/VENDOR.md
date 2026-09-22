@@ -146,14 +146,52 @@ board declares 327680 and its percentages are honest. Do not compare the two
 numbers directly, and do not trust a comfortable-looking RAM percentage on
 this target.
 
-### Also observed, not yet probed deliberately
+### The rest, answered by Bruno's own probe build
 
-- **SD slot present and empty** - the factory firmware's mount fails with
+`src/bruno_main.cpp` reports these at boot, so they are re-checkable rather
+than a one-off note:
+
+```
+[bruno] chip      : ESP32-D0WDQ6-V3 rev 3, 2 core(s) @ 240 MHz
+[bruno] flash     : 16777216 bytes, 40 MHz
+[bruno] psram     : 0 bytes (none, as measured)
+[bruno] heap free : 316068 bytes
+[bruno] display   : 320x240
+[bruno] imu       : M5Unified reports NONE
+[bruno] i2c scan  : 0x75
+[bruno] speaker   : tone sent (enabled)
+```
+
+- **No IMU.** This was an open question in the Bruno design and the answer is
+  no. M5Unified reports none, and the only device answering on the internal
+  I2C bus is `0x75` - the IP5306 power-management IC. An MPU6886 would sit at
+  0x68 or 0x69 and nothing is there. Anything in the design that assumed a
+  shake or face-down gesture needs another input.
+- **Display is 320x240**, as the design assumed. Worth having confirmed rather
+  than inherited: `shepherd_ui.cpp` is already resolution-agnostic, so its
+  staleness and version screens render here unchanged.
+- **316,068 bytes of heap free**, which puts a real number on the caveat
+  above: `m5stack-grey` claims 532,480 bytes of RAM, the chip has roughly
+  320KB, and PlatformIO's percentage is computed against the claim. Bruno's
+  build reports 7.6% used; against what is actually there it is nearer 11%.
+- **Speaker is enabled and accepts a tone.** Whether it is AUDIBLE is not
+  something a probe can answer - that needs an ear in the room.
+- **Buttons A/B/C report over serial** when pressed, but no press has been
+  confirmed yet. The handler is in `loop()`; pressing them is a human step.
+- **SD slot present and empty** - the factory firmware's mount failed with
   `sdCommand(): no token received` / `f_mount failed: (3)`. Expected with no
-  card in; it does confirm the slot is wired.
-- **Display works** - the factory firmware is M5Stack's graphics benchmark and
-  it ran to completion (`Rounded rects (filled) 380812`, `Done!`).
-- **Buttons, speaker and IMU are still unprobed.** They need a sketch rather
-  than a bootloader conversation, so they come with the first Bruno build.
-  Whether a v2.7 Core Basic carries an IMU at all is still an open question -
-  an I2C scan answers it.
+  card in; it does confirm the slot is wired. Bruno does not use it.
+
+### The ingest path works on this board, with real frames
+
+Not a unit test: real lines taken from the relay's own `frames.ndjson` and
+written down the wire.
+
+- A **951-byte, 10-agent snapshot** reassembled by `line_buf.h` and parsed by
+  `shepherd_frame.h`, with every alias and status correct.
+- A real **`said` frame** parsed by `bruno_frame.h`, em dash intact - so UTF-8
+  survives relay, file, serial and device.
+- A **`key` frame ignored**, which is the device-side half of the guard that
+  keeps the shared secret off the stream. It works independently of the
+  publisher refusing to write one.
+- A **v99 frame refused** rather than guessed at.

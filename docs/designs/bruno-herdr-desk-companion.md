@@ -308,8 +308,17 @@ before the board arrives.
    over a herd it cannot see — Shepherd's `NO SIGNAL` rule, ported. With no
    BLE and no keys, staleness is the only failure Bruno can report, so it has
    to report it well.
-4. **Hardware:** display driver, button behaviour, speaker, IMU on v2.7 — and
-   `Serial`-to-USB, which is bench probe #1 and the one with no fallback.
+4. ~~**Hardware:** display driver, button behaviour, speaker, IMU on v2.7 — and
+   `Serial`-to-USB, which is bench probe #1 and the one with no fallback.~~
+   **Probed 2026-09-22, all recorded in `firmware/VENDOR.md`.** `Serial`
+   reaches USB with no flag at all (classic ESP32 behind an external CH9102
+   bridge on UART0, so the Cardputer's trap does not apply). Display is
+   320x240 as assumed. **There is no IMU** — M5Unified reports none and only
+   the IP5306 at `0x75` answers on I2C, so any shake or face-down gesture
+   needs another input. No PSRAM. 16MB flash, DIO at 40MHz, which makes
+   `m5stack-grey` the board definition rather than either of the two whose
+   names look right. Speaker accepts a tone; audibility and the buttons need a
+   human in the room.
 5. **Relay platform support.** See below; this one blocks the stated goal.
 6. ~~How does `bruno.py` get launched without punishing Shepherd users who
    have no Bruno?~~ **Decided, because leaving it open left the original
