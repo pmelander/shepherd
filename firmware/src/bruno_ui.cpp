@@ -26,17 +26,31 @@
 
 namespace {
 
-// A sheep is off-white wool, a dark face and dark legs. Kept as named
-// constants because "which grey" gets adjusted a lot and hunting hex literals
-// through drawing code is miserable.
-constexpr uint16_t C_BG      = TFT_BLACK;
+// Named because "which green" gets adjusted a lot and hunting RGB565 literals
+// through drawing code is miserable. RGB565 is ((R>>3)<<11)|((G>>2)<<5)|(B>>3).
+constexpr uint16_t C_SKY_HI  = 0x3C1B;   // deep blue overhead
+constexpr uint16_t C_SKY_LO  = 0xA69E;   // pale at the horizon
+constexpr uint16_t C_SUN     = 0xFF50;
+constexpr uint16_t C_CLOUD   = 0xFFFF;
+constexpr uint16_t C_CLOUD_S = 0xE75E;   // its underside
+constexpr uint16_t C_HILL_FAR = 0x5D48;  // sunlit, further off
+constexpr uint16_t C_HILL_MID = 0x3C66;
+constexpr uint16_t C_GRASS    = 0x2B65;  // the field he stands in
+
 constexpr uint16_t C_WOOL    = 0xEF7D;   // warm off-white
 constexpr uint16_t C_WOOL_SH = 0xB596;   // its shadow
 constexpr uint16_t C_FACE    = 0x31A6;   // near-black, but not the background
+
+constexpr uint16_t C_BUBBLE  = 0xFFDD;   // cream, so dark text sits on it
+constexpr uint16_t C_INK     = 0x1905;
+constexpr uint16_t C_BG      = TFT_BLACK;  // the error screens only
 constexpr uint16_t C_TEXT    = TFT_WHITE;
 constexpr uint16_t C_DIM     = 0x8410;
-constexpr uint16_t C_ALERT   = 0xFD20;   // amber: someone is waiting on you
-constexpr uint16_t C_HAPPY   = 0x07E0;   // green: something finished
+constexpr uint16_t C_ALERT   = 0xC1A0;   // amber, dark enough to read on cream
+constexpr uint16_t C_HAPPY   = 0x0460;   // green, likewise
+
+// Where the land starts. The sheep's feet land in it rather than on the line.
+constexpr int kHorizon = 168;
 
 // What is already on screen, so a repaint only happens when it must.
 BrunoMood g_lastMood = (BrunoMood)0xFF;
@@ -52,6 +66,65 @@ int g_lastWorking = -1, g_lastBlocked = -1, g_lastDone = -1;
 int sheepCx() { return M5.Display.width() / 2 - 10; }
 constexpr int kHeadDx = 34;                     // head offset from the body
 int sheepHeadX() { return sheepCx() + kHeadDx; }
+
+// ------------------------------------------------------------------- scene
+
+// Clouds drift. This is not decoration: it is the liveness indicator, and it
+// replaces the "alive N" counter the bring-up build printed in a corner. A
+// frozen screen and a quiet herd look identical on a device whose whole job
+// is to sit still looking calm, so SOMETHING has to keep moving - and a cloud
+// belongs in the picture in a way that a debug counter does not.
+int g_drift = 0;
+
+void skyBand(int y0, int y1) {
+  // Vertical gradient by horizontal lines. Cheap, and only redrawn when the
+  // clouds move or the whole view changes.
+  const int w = M5.Display.width();
+  const int span = kHorizon > 0 ? kHorizon : 1;
+  for (int y = y0; y < y1; y++) {
+    const int t = (y * 255) / span;              // 0 at the top, 255 at land
+    const uint8_t r = (uint8_t)((0x3C * (255 - t) + 0xA6 * t) / 255);
+    const uint8_t g = (uint8_t)((0x78 * (255 - t) + 0xD2 * t) / 255);
+    const uint8_t b = (uint8_t)((0xD8 * (255 - t) + 0xF5 * t) / 255);
+    M5.Display.drawFastHLine(0, y, w, M5.Display.color565(r, g, b));
+  }
+  (void)C_SKY_HI; (void)C_SKY_LO;   // the endpoints the gradient interpolates
+}
+
+void drawCloud(int cx, int cy, int scale) {
+  M5.Display.fillCircle(cx, cy, 6 * scale / 10, C_CLOUD_S);
+  M5.Display.fillCircle(cx - 9 * scale / 10, cy + 2, 7 * scale / 10, C_CLOUD);
+  M5.Display.fillCircle(cx, cy - 4, 9 * scale / 10, C_CLOUD);
+  M5.Display.fillCircle(cx + 10 * scale / 10, cy + 1, 7 * scale / 10, C_CLOUD);
+}
+
+// The band the clouds live in, redrawn on its own so drifting costs a strip
+// rather than a whole screen.
+constexpr int kCloudY0 = 0, kCloudY1 = 30;
+
+void drawClouds() {
+  const int w = M5.Display.width();
+  skyBand(kCloudY0, kCloudY1);
+  // The sun sits behind them, top right.
+  M5.Display.fillCircle(w - 34, 14, 13, C_SUN);
+  // Two clouds at different speeds, so the sky does not look like a
+  // conveyor belt.
+  drawCloud((g_drift % (w + 80)) - 40, 16, 12);
+  drawCloud(((g_drift * 2 / 3 + 170) % (w + 80)) - 40, 10, 9);
+}
+
+void drawScene() {
+  const int w = M5.Display.width(), h = M5.Display.height();
+  skyBand(0, kHorizon);
+  drawClouds();
+
+  // Rolling pasture: overlapping ellipses, furthest and palest first.
+  M5.Display.fillEllipse(w / 4, kHorizon + 26, w / 2 + 30, 34, C_HILL_FAR);
+  M5.Display.fillEllipse(w - 30, kHorizon + 30, w / 2, 32, C_HILL_FAR);
+  M5.Display.fillEllipse(w / 2 + 40, kHorizon + 34, w / 2, 30, C_HILL_MID);
+  // And the field he actually stands in.
+  M5.Display.fillRect(0, kHorizon + 22, w, h - kHorizon - 22, C_GRASS);
+}
 
 uint16_t moodColour(BrunoMood m) {
   switch (m) {
@@ -141,48 +214,54 @@ void bubbleText(const char* text, int x, int y, int w, int maxLines) {
 }
 
 void drawBubble(const BrunoView& v) {
-  const int w = M5.Display.width();
-  const int bx = 10, by = 28, bw = w - 20, bh = 74;
-  M5.Display.fillRoundRect(bx, by, bw, bh, 8, C_BG);
+  // Nothing to say: no bubble at all, and the sky shows through. The old
+  // version filled the area black whether or not it had anything in it, which
+  // over a scene would be a hole rather than an absence.
   if (!v.text[0] && !v.pane[0]) return;
 
+  const int w = M5.Display.width();
+  const int bx = 10, by = 28, bw = w - 20, bh = 74;
   const uint16_t edge = moodColour(v.mood);
+  M5.Display.fillRoundRect(bx, by, bw, bh, 8, C_BUBBLE);
   M5.Display.drawRoundRect(bx, by, bw, bh, 8, edge);
   // The tail, on the RIGHT, leaning the same way the head does and pointing
   // down at it. Anchored to sheepHeadX() rather than to the bubble, so it
   // follows the sheep if either moves.
   const int tx = sheepHeadX();
   const int base = by + bh;
-  M5.Display.fillTriangle(tx - 16, base, tx - 2, base, tx + 4, base + 12, C_BG);
+  M5.Display.fillTriangle(tx - 16, base, tx - 2, base, tx + 4, base + 12,
+                          C_BUBBLE);
   M5.Display.drawLine(tx - 16, base, tx + 4, base + 12, edge);
   M5.Display.drawLine(tx + 4, base + 12, tx - 2, base, edge);
   // Erase the bubble's own border between the tail's feet so it reads as one
   // shape rather than a triangle stuck to a box.
-  M5.Display.drawFastHLine(tx - 15, base, 13, C_BG);
+  M5.Display.drawFastHLine(tx - 15, base, 13, C_BUBBLE);
 
   M5.Display.setTextSize(1);
   if (v.pane[0]) {
-    M5.Display.setTextColor(edge, C_BG);
+    M5.Display.setTextColor(edge, C_BUBBLE);
     char who[40];
     snprintf(who, sizeof(who), "%s %s", v.pane,
              v.mood == BRUNO_MOOD_ATTENTION ? "is asking" : "finished");
     M5.Display.drawString(who, bx + 10, by + 8);
   }
-  M5.Display.setTextColor(C_TEXT, C_BG);
+  M5.Display.setTextColor(C_INK, C_BUBBLE);
   bubbleText(v.text, bx + 10, by + 24, bw - 20, 4);
 }
 
 // ------------------------------------------------------------------- strip
 
 void drawStrip(const BrunoView& v) {
+  // A band of shade along the bottom of the field, rather than a black bar
+  // cut out of it.
   const int w = M5.Display.width(), h = M5.Display.height();
-  M5.Display.fillRect(0, h - 16, w, 16, C_BG);
-  M5.Display.drawFastHLine(0, h - 18, w, C_DIM);
+  M5.Display.fillRect(0, h - 17, w, 17, 0x1A43);
+  M5.Display.drawFastHLine(0, h - 18, w, 0x4B0A);
   M5.Display.setTextSize(1);
   char s[48];
   snprintf(s, sizeof(s), "%d working   %d blocked   %d done", v.working,
            v.blocked, v.done);
-  M5.Display.setTextColor(C_DIM, C_BG);
+  M5.Display.setTextColor(0xCE79, 0x1A43);
   M5.Display.drawString(s, 8, h - 13);
 }
 
@@ -249,13 +328,24 @@ void brunoUiDraw(const BrunoView& v) {
   if (v.mood == BRUNO_MOOD_STALE) { drawNoSignal(); return; }
   if (v.mood == BRUNO_MOOD_BAD_VERSION) { drawBadVersion(); return; }
 
-  M5.Display.fillScreen(C_BG);
+  drawScene();
   M5.Display.setTextDatum(top_left);
   M5.Display.setTextSize(1);
-  M5.Display.setTextColor(moodColour(v.mood), C_BG);
-  M5.Display.drawString("BRUNO", 10, 8);
 
   drawBubble(v);
-  drawSheep(sheepCx(), 150, v.mood);
+  // Feet land IN the grass rather than on the horizon line.
+  drawSheep(sheepCx(), kHorizon - 14, v.mood);
   drawStrip(v);
+}
+
+void brunoUiTick() {
+  // Called on the heartbeat. Drifts the clouds and redraws only their band,
+  // which is what proves the screen is alive when the herd is quiet - the job
+  // the bring-up build's "alive N" counter used to do, now done by something
+  // that belongs in the picture.
+  if (g_lastMood == BRUNO_MOOD_STALE || g_lastMood == BRUNO_MOOD_BAD_VERSION) {
+    return;   // an error screen should not have weather
+  }
+  g_drift = (g_drift + 3) % 100000;
+  drawClouds();
 }

@@ -6,16 +6,17 @@
 // also means Shepherd's main cannot regress because of a change made for
 // Bruno. `build_src_filter` in platformio.ini is the whole mechanism.
 //
-// THIS FIRST VERSION IS A PROBE, and says so on the screen. The design's step
-// 5 is "when the board lands, probe before you code": Serial reach, chip and
-// flash, then buttons, speaker, IMU. The first two were answered from the ROM
-// bootloader and are recorded in VENDOR.md. The rest need code running on the
-// board, so they live here rather than in a throwaway sketch - the probe
-// becomes the skeleton instead of being deleted.
+// The probes at the top are what is left of the bring-up build, and they stay.
+// The design's step 5 was "when the board lands, probe before you code" -
+// Serial reach, chip and flash, then buttons, speaker, IMU - and every answer
+// is recorded in VENDOR.md. They report at every boot rather than once,
+// because a fact you can re-check beats a fact you wrote down.
 //
-// It also exercises the real ingest path end to end: line_buf.h reassembling
-// bytes off the wire, then shepherd_frame.h and bruno_frame.h parsing them.
-// Pipe real frames at it from frames.ndjson and it will say what it saw.
+// What HAS gone is the probe's screen: the banner, the counters, the big
+// yellow letter on a keypress, the "alive N" tick. Each existed to make
+// something observable before the real UI could show it, each filled a
+// rectangle with black to do so, and each would now be a hole punched in a
+// field. Liveness moved into the picture instead - the clouds drift.
 
 #include <Arduino.h>
 #include <M5Unified.h>
@@ -128,25 +129,15 @@ static void probeBoard() {
 }
 
 static void probeSpeaker() {
-  // Loud and long on purpose for a bring-up probe. Shepherd's SFX_VOLUME of
-  // 80/255 was tuned for the Cardputer's transducer after "it was a bit
-  // loud"; nothing says that number carries to a different speaker on a
-  // different board, and a probe that cannot be heard proves nothing.
-  M5.Speaker.setVolume(255);
-  const bool ok = M5.Speaker.tone(2000, 400);
-  Serial.printf("[bruno] speaker   : enabled=%d volume=%d tone()=%s\n",
-                (int)M5.Speaker.isEnabled(), (int)M5.Speaker.getVolume(),
-                ok ? "accepted" : "REFUSED");
-  // tone() is asynchronous - it queues on a background task. Returning
-  // straight into setup() could have the sketch move on before a note ever
-  // reached the DAC, which would look exactly like a dead speaker.
-  M5.Speaker.end();
-  M5.Speaker.begin();
-  M5.Speaker.setVolume(255);
-  M5.Speaker.tone(1000, 400);
-  delay(600);
-  Serial.printf("[bruno] speaker   : second tone after an explicit "
-                "end()/begin(), playing=%d\n", (int)M5.Speaker.isPlaying());
+  // Reports, and no longer makes a noise. This used to play two loud tones at
+  // boot, which was the right thing when the question was whether the speaker
+  // worked at all - a probe nobody can hear proves nothing. It is confirmed
+  // working now, so the tones are just a device that announces itself every
+  // time the power blinks. The state is still printed, because that is the
+  // half that costs nothing.
+  Serial.printf("[bruno] speaker   : enabled=%d volume=%d (silent at boot "
+                "by choice)\n",
+                (int)M5.Speaker.isEnabled(), (int)M5.Speaker.getVolume());
 }
 
 // Read the button GPIOs directly, beside what M5Unified reports. If the raw
@@ -165,29 +156,6 @@ static void probeButtonPins() {
                 "(1 = released, these are active-low)\n",
                 digitalRead(BTN_A_PIN), digitalRead(BTN_B_PIN),
                 digitalRead(BTN_C_PIN));
-}
-
-// ---------------------------------------------------------------- screen
-
-static void banner(const char* status) {
-  M5.Display.fillScreen(TFT_BLACK);
-  M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
-  M5.Display.setTextDatum(top_left);
-  M5.Display.setTextSize(2);
-  M5.Display.drawString("BRUNO", 8, 8);
-  M5.Display.setTextSize(1);
-  M5.Display.drawString("probe build - not the real UI yet", 8, 34);
-  M5.Display.drawString(status, 8, 52);
-}
-
-static void showCounts() {
-  char line[64];
-  snprintf(line, sizeof(line), "snap=%lu  said=%lu  rejected=%lu  dropped=%lu",
-           (unsigned long)g_frames, (unsigned long)g_saids,
-           (unsigned long)g_rejected, (unsigned long)g_line.dropped);
-  M5.Display.fillRect(0, 70, M5.Display.width(), 20, TFT_BLACK);
-  M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
-  M5.Display.drawString(line, 8, 70);
 }
 
 // ---------------------------------------------------------------- ingest
@@ -275,8 +243,6 @@ void setup() {
   Serial.printf("[bruno] ready. Pipe frames.ndjson at me.\n");
   Serial.printf("[bruno] press A / B / C to report the buttons.\n");
 
-  banner("waiting for frames on serial");
-  showCounts();
 }
 
 // A device that only speaks when something happens cannot be told apart from
@@ -302,15 +268,11 @@ static void heartbeat() {
                 (unsigned long)g_frames, (unsigned long)g_saids,
                 (unsigned long)g_line.dropped, (unsigned)ESP.getFreeHeap());
 
-  // Something that visibly moves, so a live screen and a frozen one are
-  // distinguishable from across the desk without reading anything.
-  static uint32_t beats = 0;
-  char tick[32];
-  snprintf(tick, sizeof(tick), "alive %lu", (unsigned long)++beats);
-  M5.Display.fillRect(0, M5.Display.height() - 20, M5.Display.width(), 20,
-                      TFT_BLACK);
-  M5.Display.setTextColor(TFT_DARKGREY, TFT_BLACK);
-  M5.Display.drawString(tick, 8, M5.Display.height() - 18);
+  // Liveness, and it has moved into the picture. The bring-up build printed
+  // an "alive N" counter in a corner, which meant filling a rectangle with
+  // black - fine on a black screen, a hole punched in the sky on this one.
+  // Drifting clouds do the same job and belong where they are.
+  brunoUiTick();
 }
 
 // Raw, active-low, with a tiny debounce. Independent of M5Unified entirely,
@@ -339,20 +301,16 @@ void loop() {
                   : rawPressed(BTN_C_PIN, &wasC) ? "C" : nullptr;
   if (raw) {
     Serial.printf("[bruno] button    : %s (RAW GPIO)\n", raw);
-    // On screen and audible, so a press is confirmable without watching a
-    // serial monitor at all.
-    M5.Display.fillRect(0, 160, M5.Display.width(), 30, TFT_BLACK);
-    M5.Display.setTextColor(TFT_YELLOW, TFT_BLACK);
-    M5.Display.setTextSize(3);
-    M5.Display.drawString(raw, 8, 160);
-    M5.Display.setTextSize(1);
+    // The big yellow letter is gone. It existed to make a press observable
+    // during bring-up, when the only other channel was a serial monitor
+    // nobody had open - and it worked, the buttons are confirmed. Drawing it
+    // now would mean filling a rectangle with black over a field. The beep
+    // and the serial line are enough, and C still fetches a sheep.
     M5.Speaker.setVolume(255);
     if (raw[0] == 'C') {
       // C is the sheep. The whole 64KB budget went on one good bleat rather
       // than three mediocre ones, and this is the first time it has been
       // asked to make a noise on hardware.
-      M5.Display.setTextColor(TFT_GREEN, TFT_BLACK);
-      M5.Display.drawString("baa", 60, 168);
       const bool ok = M5.Speaker.playWav(baa_wav, sizeof(baa_wav));
       Serial.printf("[bruno] baa       : playWav(%u bytes) -> %s\n",
                     (unsigned)sizeof(baa_wav), ok ? "accepted" : "REFUSED");

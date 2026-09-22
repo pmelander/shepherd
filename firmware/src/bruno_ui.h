@@ -12,3 +12,9 @@ void brunoUiDraw(const BrunoView& v);
 // Force the next draw to repaint everything, after something else has been on
 // the display.
 void brunoUiInvalidate();
+
+// Drift the clouds. Call it on a slow timer - this is the liveness signal,
+// and it matters because a frozen screen and a quiet herd look identical on a
+// device whose whole job is to sit still looking calm. Redraws only the sky
+// band, and does nothing on the error screens, which should not have weather.
+void brunoUiTick();
