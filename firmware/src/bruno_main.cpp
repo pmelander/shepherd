@@ -21,6 +21,7 @@
 #include <M5Unified.h>
 #include <Wire.h>
 
+#include "baa_wav.h"     // generated at build time from assets/bruno/baa.wav
 #include "bruno_frame.h"
 #include "line_buf.h"
 #include "shepherd_frame.h"
@@ -323,7 +324,18 @@ void loop() {
     M5.Display.drawString(raw, 8, 160);
     M5.Display.setTextSize(1);
     M5.Speaker.setVolume(255);
-    M5.Speaker.tone(1500, 80);
+    if (raw[0] == 'C') {
+      // C is the sheep. The whole 64KB budget went on one good bleat rather
+      // than three mediocre ones, and this is the first time it has been
+      // asked to make a noise on hardware.
+      M5.Display.setTextColor(TFT_GREEN, TFT_BLACK);
+      M5.Display.drawString("baa", 60, 168);
+      const bool ok = M5.Speaker.playWav(baa_wav, sizeof(baa_wav));
+      Serial.printf("[bruno] baa       : playWav(%u bytes) -> %s\n",
+                    (unsigned)sizeof(baa_wav), ok ? "accepted" : "REFUSED");
+    } else {
+      M5.Speaker.tone(1500, 80);
+    }
   }
 
   while (Serial.available()) {

@@ -174,10 +174,19 @@ than a one-off note:
   above: `m5stack-grey` claims 532,480 bytes of RAM, the chip has roughly
   320KB, and PlatformIO's percentage is computed against the claim. Bruno's
   build reports 7.6% used; against what is actually there it is nearer 11%.
-- **Speaker is enabled and accepts a tone.** Whether it is AUDIBLE is not
-  something a probe can answer - that needs an ear in the room.
-- **Buttons A/B/C report over serial** when pressed, but no press has been
-  confirmed yet. The handler is in `loop()`; pressing them is a human step.
+- **Speaker works.** Confirmed audibly on 2026-09-22. `isEnabled()` is true,
+  volume is settable to 255, and a tone is heard.
+- **Buttons A, B and C all work.** Confirmed by press on 2026-09-22, on both
+  channels: M5Unified's `wasPressed()` and a raw active-low read of GPIO 39,
+  38 and 37.
+
+Both were briefly believed broken, and neither was. The first probe build
+reported presses to SERIAL ONLY and played one 120ms tone at volume 80 during
+setup - so with no monitor open, a press produced nothing observable and the
+tone was easy to miss entirely. The lesson is not about this board: a probe
+whose output nobody is positioned to see is indistinguishable from a fault,
+and the fix was to report on three channels at once (screen, speaker, serial)
+rather than to go looking at the hardware.
 - **SD slot present and empty** - the factory firmware's mount failed with
   `sdCommand(): no token received` / `f_mount failed: (3)`. Expected with no
   card in; it does confirm the slot is wired. Bruno does not use it.
