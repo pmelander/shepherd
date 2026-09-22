@@ -74,3 +74,86 @@ list rather than a wall.
    `working-directory: firmware` and firmware-relative paths, plus
    `/.github/workflows/ci.yml`, which runs both test suites on every push. Found by
    `/plan-eng-review` on 2026-09-08.
+
+## Bruno's board: M5Stack Core Basic v2.7, as measured
+
+Probed on arrival, 2026-09-22, before a line of Bruno firmware was written.
+The design said to record what the board reports rather than what the product
+page claims, because this project has already had `-DBOARD_HAS_PSRAM` taken
+from a spec sheet and falsified by esptool on the Cardputer. It happened
+again here.
+
+| | |
+|---|---|
+| Chip | ESP32-D0WDQ6-V3, revision v3.1 |
+| Features | WiFi, BT, Dual Core, 240MHz, VRef calibration in efuse |
+| Crystal | 40MHz |
+| Flash | **16MB**, device `4018`, `mode:DIO`, `clock div:2` (40MHz) |
+| PSRAM | **NONE** |
+| MAC | f4:2d:c9:d0:80:1c |
+| USB bridge | WCH **CH9102**, `1A86:55D4`, enumerates as its own COM port |
+
+### `Serial` reaches USB, and needs no flag
+
+This was bench probe #1 and the one with no fallback: Bruno has no BLE, so a
+board whose `Serial` does not reach the host has no way to say so. It passes,
+and unlike the Cardputer it passes for free.
+
+The Cardputer ADV is an ESP32-S3 with native USB, whose board definition sets
+`ARDUINO_USB_MODE=1` without `ARDUINO_USB_CDC_ON_BOOT`, so `Serial` landed on
+a UART0 that is not wired to the connector while ESP-IDF logs still reached
+the host - an asymmetry that cost three wrong hypotheses in one session. The
+Core Basic is a classic ESP32 behind an EXTERNAL bridge on UART0, which is
+the same UART the ROM bootloader uses. So if esptool can talk to it, `Serial`
+can too, and esptool can.
+
+Confirmed directly by holding the port open and pulsing EN via RTS, which
+captures the whole boot. That capture is itself a difference worth knowing:
+the bridge stays enumerated across a chip reset, so boot output can be caught
+in one go. On the S3's native USB the device re-enumerates and a capture
+script has to reopen in a loop.
+
+```
+ets Jul 29 2019 12:21:46
+rst:0x1 (POWERON_RESET),boot:0x17 (SPI_FAST_FLASH_BOOT)
+mode:DIO, clock div:2
+E (56) psram: PSRAM ID read error: 0xffffffff
+[W][esp32-hal-psram.c:30] psramInit(): PSRAM init failed!
+M5Stack initializing...
+OK
+```
+
+`[W][esp32-hal-psram.c:30]` is Arduino-HAL and `M5Stack initializing...` is
+sketch level, so Arduino-level output arrives without any CDC flag.
+
+### The board definition to use is `m5stack-grey`
+
+Not the obvious one, and picking by name would have been wrong twice over.
+Measured against what the board actually reports:
+
+| definition | flash | mode | f_flash | PSRAM flag | |
+|---|---|---|---|---|---|
+| `m5stack-core-esp32` | 4MB | qio | - | no | wrong size AND mode |
+| `m5stack-core-esp32-16M` | 16MB | qio | 80MHz | no | wrong mode and clock |
+| `m5stack-fire` | 16MB | dio | 40MHz | **yes** | PSRAM flag is false here |
+| **`m5stack-grey`** | **16MB** | **dio** | **40MHz** | no | **matches** |
+
+One caveat carried with it: `m5stack-grey` declares
+`maximum_ram_size: 532480`, which is more DRAM than an ESP32 without PSRAM
+has. PlatformIO uses that only for the percentage in its build summary, so
+Bruno's reported RAM usage will read LOWER than it really is. The Cardputer's
+board declares 327680 and its percentages are honest. Do not compare the two
+numbers directly, and do not trust a comfortable-looking RAM percentage on
+this target.
+
+### Also observed, not yet probed deliberately
+
+- **SD slot present and empty** - the factory firmware's mount fails with
+  `sdCommand(): no token received` / `f_mount failed: (3)`. Expected with no
+  card in; it does confirm the slot is wired.
+- **Display works** - the factory firmware is M5Stack's graphics benchmark and
+  it ran to completion (`Rounded rects (filled) 380812`, `Done!`).
+- **Buttons, speaker and IMU are still unprobed.** They need a sketch rather
+  than a bootloader conversation, so they come with the first Bruno build.
+  Whether a v2.7 Core Basic carries an IMU at all is still an open question -
+  an I2C scan answers it.
