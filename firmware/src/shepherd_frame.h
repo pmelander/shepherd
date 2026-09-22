@@ -244,9 +244,22 @@ struct ShepherdFrame {
   // for at least as much as `blocked` is: an agent finishing in a workspace
   // you are not watching is the common event, and blocking is the rare one.
   //
-  // A focused tab never reaches `done`, which is correct and worth knowing
-  // before wondering why nothing fired: if you were looking at it, you have
-  // already been told.
+  // A focused tab never reaches `done` — it goes working -> idle — so this
+  // will not find the pane you were looking at when its agent finished. That
+  // used to be the whole answer, on the reasoning that if you were looking
+  // at it you had already been told. Living with it disproved that: focus is
+  // not attention, and the pane you have focused while reading docs or on a
+  // call is the one you most want a bleat from.
+  //
+  // So the relay now sends a `said` frame on that transition too, and Bruno
+  // celebrates off the queue rather than off this function. Nothing here
+  // changed, and nothing here should: this answers "who is done in the
+  // snapshot", which for a focused pane is honestly nobody.
+  //
+  // The Cardputer still misses it, because its alarm reads the snapshot and
+  // it does not parse `said` at all. Fixing that means the frame carrying
+  // the finish, which means saying `done` where Herdr says `idle` — a lie
+  // worth more thought than it has had.
   int firstDone(int from = 0) const {
     for (int i = from; i < count; i++)
       if (agents[i].isDone()) return i;

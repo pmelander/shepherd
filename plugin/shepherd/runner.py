@@ -71,7 +71,7 @@ from .auth import (
 from .events import EventStreamError, PipeEventSource
 from .frame import MAX_OPTIONS, FrameBuilder, iso, truncate_option, utcnow
 from .herdr import CliHerdrSource, HerdrSource
-from .models import AgentStatus, HerdSnapshot
+from .models import Agent, AgentStatus, HerdSnapshot
 from .prompt import parse_prompt
 from .publish import FramePublisher
 from .recap import extract_answer
@@ -239,6 +239,22 @@ class Runner:
     # for a vanished pane, below: otherwise this grows for the life of the
     # relay.
     _announced: dict[str, int] = field(default_factory=dict, init=False)
+    # Panes that finished while you were LOOKING at them, as pane -> the seq
+    # they landed on. Herdr draws `done` and `idle` from the same readiness
+    # state and splits them on whether the tab has been seen, so a focused
+    # pane goes working -> idle and never passes through `done` at all.
+    # Nothing was wrong with that reasoning ("if you were looking at it, you
+    # have already been told") except that it is not true: focus is not
+    # attention, and the pane you are focused on while reading docs or on a
+    # call is exactly the one worth a bleat.
+    #
+    # The transition is the signal, never the state. `idle` is also where
+    # every agent rests, so announcing on the STATE would announce the whole
+    # herd at startup. And a direct working -> idle is only reachable on a
+    # focused pane, because an unfocused one stops at `done` on the way -
+    # which is why this needs no focus check to leave unfocused behaviour
+    # exactly as it was.
+    _finished_idle: dict[str, int] = field(default_factory=dict, init=False)
     _dirty: bool = field(default=True, init=False)
     # The most recently built frame. Written by the herd loop, read by the
     # transport's push loop. ONE object rather than parallel fields so a
@@ -298,12 +314,39 @@ class Runner:
             self._seqs.pop(pane_id, None)
             self._prompts.pop(pane_id, None)
             self._announced.pop(pane_id, None)
+            self._finished_idle.pop(pane_id, None)
             self._dirty = True
 
         if not self._snapshot.ok:
             self._dirty = True   # recovering from a failure is worth a frame
+        self._note_focused_finishes(snap)
         self._snapshot = snap
         await self._fetch_prompts()
+
+    def _note_focused_finishes(self, snap: HerdSnapshot) -> None:
+        """Record working -> idle, the finish a focused pane makes.
+
+        Called with the incoming snapshot while `self._snapshot` is still the
+        previous one, because the transition is only visible from both.
+
+        Deliberately blind in one case: an agent that starts AND finishes
+        between two polls is seen as idle both times, so nothing fires. That
+        is a task shorter than the poll interval, and the alternative -
+        inferring a finish from a seq that moved twice - would fire on
+        anything at all that happened in the gap.
+        """
+        if not snap.ok or not self._snapshot.ok:
+            # A failed poll shows every agent as unknown. Reading a finish out
+            # of a snapshot that is really an outage would bleat at the herd
+            # going dark, which is the opposite of the news.
+            return
+        was = self._snapshot.by_pane()
+        for a in snap.agents:
+            if a.status is not AgentStatus.IDLE:
+                continue
+            prev = was.get(a.pane_id)
+            if prev is not None and prev.status is AgentStatus.WORKING:
+                self._finished_idle[a.pane_id] = a.state_change_seq
 
     async def _fetch_prompts(self) -> None:
         """Read the question for each blocked agent, once per state change."""
@@ -507,9 +550,23 @@ class Runner:
             await self._announce_finished()
             await self.sleep(self.tick)
 
+    def _is_finish(self, a: Agent) -> bool:
+        """Whether this agent is sitting on news worth announcing.
+
+        Two shapes of the same event. `done` is a finish nobody has looked at
+        yet; a recorded working -> idle is a finish that happened under your
+        nose, on the pane you had focused. Both are an agent that stopped
+        having work to do, and the seq is what makes either one a single
+        piece of news rather than a state that keeps being true.
+        """
+        if a.status is AgentStatus.DONE:
+            return True
+        return (a.status is AgentStatus.IDLE
+                and self._finished_idle.get(a.pane_id) == a.state_change_seq)
+
     async def _announce_finished(self) -> None:
         for a in self._snapshot.agents:
-            if a.status is not AgentStatus.DONE:
+            if not self._is_finish(a):
                 continue
             if self._announced.get(a.pane_id) == a.state_change_seq:
                 continue
@@ -544,7 +601,7 @@ class Runner:
             current = self._snapshot.by_pane().get(a.pane_id)
             if (current is None
                     or current.state_change_seq != a.state_change_seq
-                    or current.status is not AgentStatus.DONE):
+                    or not self._is_finish(current)):
                 log.debug("%s moved on while reading its recap; not "
                           "announcing", a.pane_id)
                 continue

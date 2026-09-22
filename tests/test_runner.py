@@ -543,6 +543,106 @@ def test_only_done_agents_are_announced(tmp_path):
         assert _announcements(publisher) == [], f"{status.value} was announced"
 
 
+# -- the finish that happens under your nose ------------------------------
+#
+# Herdr splits `done` from `idle` on whether the tab has been SEEN, so a pane
+# you had FOCUSED when its agent finished goes working -> idle and never
+# passes through `done`. Announcing only on `done` therefore stayed silent
+# about the one pane you were most likely to care about. These four pin the
+# transition rule: it is the working -> idle EDGE that is news, never the
+# idle state, which is also where every agent rests.
+
+
+def _working(pane="w2:p1", seq=7):
+    return HerdSnapshot(agents=(agent(pane, AgentStatus.WORKING, seq),))
+
+
+def _idle(pane="w2:p1", seq=8):
+    return HerdSnapshot(agents=(agent(pane, AgentStatus.IDLE, seq),))
+
+
+def test_a_finish_on_the_focused_pane_is_announced(tmp_path):
+    src = FakeSource([_working(seq=7)], pane_text=ANSWER_PANE)
+    r, publisher = make_announcer(src, tmp_path)
+
+    async def scenario():
+        await r.refresh()
+        await _spin(r._message_loop())
+        assert _announcements(publisher) == [], "announced while still working"
+        src.snapshots = [_idle(seq=8)]
+        await r.refresh()
+        await _spin(r._message_loop())
+
+    run(scenario())
+
+    said = _announcements(publisher)
+    assert len(said) == 1, f"expected one announcement, got {len(said)}"
+    assert said[0]["i"] == "w2:p1"
+    assert said[0]["b"] == "Done. PR #75587 is open, your review next."
+
+
+def test_an_agent_resting_in_idle_is_not_announced(tmp_path):
+    # The guard on the whole idea. `idle` is where every agent sits between
+    # jobs, so a rule that read the STATE rather than the edge would announce
+    # the entire herd on the first poll after a relay restart.
+    src = FakeSource([_idle(seq=8)], pane_text=ANSWER_PANE)
+    r, publisher = make_announcer(src, tmp_path)
+
+    async def scenario():
+        await r.refresh()
+        await _spin(r._message_loop())
+        await r.refresh()          # still idle, still the same seq
+        await _spin(r._message_loop())
+
+    run(scenario())
+    assert _announcements(publisher) == []
+
+
+def test_looking_at_a_done_agent_does_not_announce_it_again(tmp_path):
+    # done -> idle is what Herdr does when you finally LOOK at a finished
+    # pane, and it is the same news already announced from `done`. Only
+    # working -> idle is a finish; this is an acknowledgement.
+    src = FakeSource([_finished(seq=7)], pane_text=ANSWER_PANE)
+    r, publisher = make_announcer(src, tmp_path)
+
+    async def scenario():
+        await r.refresh()
+        await _spin(r._message_loop())
+        assert len(_announcements(publisher)) == 1, "the done frame was missed"
+        src.snapshots = [_idle(seq=8)]     # the human focused the tab
+        await r.refresh()
+        await _spin(r._message_loop())
+
+    run(scenario())
+    assert len(_announcements(publisher)) == 1, "the same finish twice"
+
+
+def test_an_outage_is_never_read_as_a_transition(tmp_path):
+    # A snapshot that failed is not a look at the herd, it is the absence of
+    # one, so nothing either side of it is a transition anyone observed.
+    #
+    # Today a failed snapshot always carries zero agents (herdr.py returns
+    # HerdSnapshot(ok=False) on every error path), which would make this pass
+    # on its own. So the failed snapshot here is given an agent on purpose -
+    # the point is to pin "an outage is not a transition" to the ok flag
+    # rather than to that emptiness, because the day a failed poll starts
+    # reporting last-known agents is the day the herd going dark would
+    # otherwise start bleating.
+    dark = HerdSnapshot(agents=(agent("w2:p1", AgentStatus.WORKING, 7),),
+                        ok=False, reason="cannot run herdr")
+    src = FakeSource([dark], pane_text=ANSWER_PANE)
+    r, publisher = make_announcer(src, tmp_path)
+
+    async def scenario():
+        await r.refresh()
+        src.snapshots = [_idle(seq=8)]
+        await r.refresh()
+        await _spin(r._message_loop())
+
+    run(scenario())
+    assert _announcements(publisher) == []
+
+
 def test_an_agent_that_moves_on_mid_read_is_not_announced(tmp_path):
     # state_change_seq labels a cache entry; it does NOT make the read atomic
     # with the completion. If the human focused the pane while the read was in
