@@ -102,6 +102,40 @@ void test_a_blocked_agent_takes_the_bubble_off_a_celebration(void) {
     decide(1500);                       // well inside the celebrate window
     TEST_ASSERT_EQUAL(BRUNO_MOOD_ATTENTION, v.mood);
     TEST_ASSERT_FALSE(q.holding);
+    // And it was interrupted, not spent: the finish goes back in the queue.
+    TEST_ASSERT_EQUAL(1, q.count);
+}
+
+void test_a_displaced_celebration_gets_its_turn_back(void) {
+    // Found by driving the real device: a completion that happened to be
+    // mid-show when an agent blocked was released and never re-queued, so it
+    // lost its turn entirely. That quietly contradicted "delayed, never
+    // dropped", which is the whole promise the blocked-first rule rests on.
+    q.push("w1:p1", "the one that was interrupted");
+    q.push("w2:p1", "the one behind it");
+    load("{\"t\":\"snap\",\"v\":3,\"a\":[]}");
+
+    decide(1000);
+    TEST_ASSERT_EQUAL(BRUNO_MOOD_CELEBRATE, v.mood);
+    TEST_ASSERT_EQUAL_STRING("w1:p1", v.pane);
+
+    // Something blocks a second in.
+    f.clear();
+    load("{\"t\":\"snap\",\"v\":3,\"a\":["
+         "{\"i\":\"w9:p1\",\"n\":\"z\",\"s\":\"blocked\",\"q\":\"ok?\",\"r\":\"d1\"}]}");
+    decide(2000);
+    TEST_ASSERT_EQUAL(BRUNO_MOOD_ATTENTION, v.mood);
+    TEST_ASSERT_EQUAL(2, q.count);
+
+    // Prompt dealt with. The interrupted one goes FIRST, ahead of the one it
+    // was already ahead of - being interrupted must not cost it its place.
+    f.clear();
+    load("{\"t\":\"snap\",\"v\":3,\"a\":[]}");
+    decide(3000);
+    TEST_ASSERT_EQUAL(BRUNO_MOOD_CELEBRATE, v.mood);
+    TEST_ASSERT_EQUAL_STRING("the one that was interrupted", v.text);
+    decide(3000 + BRUNO_CELEBRATE_MS);
+    TEST_ASSERT_EQUAL_STRING("the one behind it", v.text);
 }
 
 void test_the_queue_drains_once_nothing_is_blocked(void) {
@@ -250,6 +284,7 @@ int main(int, char**) {
     RUN_TEST(test_a_blocked_agent_puts_its_question_in_the_bubble);
     RUN_TEST(test_blocked_outranks_a_waiting_completion);
     RUN_TEST(test_a_blocked_agent_takes_the_bubble_off_a_celebration);
+    RUN_TEST(test_a_displaced_celebration_gets_its_turn_back);
     RUN_TEST(test_the_queue_drains_once_nothing_is_blocked);
     RUN_TEST(test_a_completion_is_delayed_by_a_prompt_but_never_dropped);
     RUN_TEST(test_a_second_announcement_for_one_agent_replaces_it);

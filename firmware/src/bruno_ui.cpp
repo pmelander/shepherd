@@ -44,6 +44,15 @@ char g_lastPane[SHEPHERD_PANE_LEN] = {0};
 char g_lastText[BRUNO_SAID_LEN] = {0};
 int g_lastWorking = -1, g_lastBlocked = -1, g_lastDone = -1;
 
+// Where the sheep stands, and where his head is. Derived in one place and
+// used by both the sheep and the bubble's tail, because the first version had
+// the tail hard-coded near the bubble's left edge while the head is on the
+// right - so it pointed at nothing. Two hand-placed numbers that have to
+// agree will eventually not agree.
+int sheepCx() { return M5.Display.width() / 2 - 10; }
+constexpr int kHeadDx = 34;                     // head offset from the body
+int sheepHeadX() { return sheepCx() + kHeadDx; }
+
 uint16_t moodColour(BrunoMood m) {
   switch (m) {
     case BRUNO_MOOD_ATTENTION:   return C_ALERT;
@@ -139,11 +148,17 @@ void drawBubble(const BrunoView& v) {
 
   const uint16_t edge = moodColour(v.mood);
   M5.Display.drawRoundRect(bx, by, bw, bh, 8, edge);
-  // The tail, pointing down at the sheep.
-  M5.Display.fillTriangle(bx + 34, by + bh, bx + 46, by + bh,
-                          bx + 30, by + bh + 10, C_BG);
-  M5.Display.drawLine(bx + 34, by + bh, bx + 30, by + bh + 10, edge);
-  M5.Display.drawLine(bx + 30, by + bh + 10, bx + 46, by + bh, edge);
+  // The tail, on the RIGHT, leaning the same way the head does and pointing
+  // down at it. Anchored to sheepHeadX() rather than to the bubble, so it
+  // follows the sheep if either moves.
+  const int tx = sheepHeadX();
+  const int base = by + bh;
+  M5.Display.fillTriangle(tx - 16, base, tx - 2, base, tx + 4, base + 12, C_BG);
+  M5.Display.drawLine(tx - 16, base, tx + 4, base + 12, edge);
+  M5.Display.drawLine(tx + 4, base + 12, tx - 2, base, edge);
+  // Erase the bubble's own border between the tail's feet so it reads as one
+  // shape rather than a triangle stuck to a box.
+  M5.Display.drawFastHLine(tx - 15, base, 13, C_BG);
 
   M5.Display.setTextSize(1);
   if (v.pane[0]) {
@@ -241,6 +256,6 @@ void brunoUiDraw(const BrunoView& v) {
   M5.Display.drawString("BRUNO", 10, 8);
 
   drawBubble(v);
-  drawSheep(M5.Display.width() / 2 - 10, 150, v.mood);
+  drawSheep(sheepCx(), 150, v.mood);
   drawStrip(v);
 }

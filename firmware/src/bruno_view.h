@@ -145,6 +145,18 @@ struct BrunoQueue {
     showing.text[0] = 0;
   }
 
+  // Give up the bubble but keep the news, at the FRONT so ordering survives.
+  // Used when something blocks mid-celebration: that finish has not had its
+  // turn, it was interrupted.
+  void requeue() {
+    if (!holding) return;
+    if (count >= BRUNO_QUEUE_MAX) count--;      // the oldest gives way
+    for (int i = count; i > 0; i--) items[i] = items[i - 1];
+    items[0] = showing;
+    count++;
+    release();
+  }
+
  private:
   static void _set(BrunoPending& slot, const char* pane, const char* text) {
     strncpy(slot.pane, pane, SHEPHERD_PANE_LEN - 1);
@@ -189,7 +201,12 @@ inline void brunoDecide(const ShepherdFrame& f, BrunoQueue& q, uint32_t now,
   // that cannot proceed without you.
   const int blocked = f.firstShowable();
   if (blocked >= 0) {
-    if (q.holding) q.release();
+    // Put the displaced finish BACK at the front of the queue rather than
+    // dropping it. Without this, a completion that happened to be mid-show
+    // when an agent blocked would lose its turn entirely - which would make
+    // "delayed, never dropped" a claim this file does not honour. It gets a
+    // full turn once the prompt is dealt with.
+    if (q.holding) q.requeue();
     out->mood = BRUNO_MOOD_ATTENTION;
     strncpy(out->pane, f.agents[blocked].pane, SHEPHERD_PANE_LEN - 1);
     strncpy(out->text, f.agents[blocked].question, BRUNO_SAID_LEN - 1);
