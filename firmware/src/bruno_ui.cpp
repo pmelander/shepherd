@@ -1,0 +1,246 @@
+// Bruno, drawn.
+//
+// A sheep, a speech bubble, and a one-line strip of herd totals. Nothing here
+// decides anything - bruno_view.h has already worked out the mood, whose news
+// it is and what the bubble says, and this turns that into pixels.
+//
+// Two notes on how rather than what.
+//
+// It redraws only on CHANGE. The loop calls this at 2Hz and a full 320x240
+// repaint every half second makes a desk toy flicker like a fault rather than
+// sit there being alive. The mood, the pane and the text are compared against
+// what is already on screen; the "alive" tick is the only thing that moves
+// unconditionally, because a frozen device and a quiet one have to be
+// distinguishable from across the room.
+//
+// There is no sheep in `src/buddies/`. Twenty species were vendored with the
+// fork - axolotl through turtle - and not one of them is a sheep, so Bruno is
+// drawn from primitives here rather than loaded from a GIF. That also
+// sidesteps the filesystem, which is the right call on this project: the
+// Cardputer's LittleFS is corrupt and its GIF characters stopped loading
+// because of it.
+
+#include <M5Unified.h>
+
+#include "bruno_ui.h"
+
+namespace {
+
+// A sheep is off-white wool, a dark face and dark legs. Kept as named
+// constants because "which grey" gets adjusted a lot and hunting hex literals
+// through drawing code is miserable.
+constexpr uint16_t C_BG      = TFT_BLACK;
+constexpr uint16_t C_WOOL    = 0xEF7D;   // warm off-white
+constexpr uint16_t C_WOOL_SH = 0xB596;   // its shadow
+constexpr uint16_t C_FACE    = 0x31A6;   // near-black, but not the background
+constexpr uint16_t C_TEXT    = TFT_WHITE;
+constexpr uint16_t C_DIM     = 0x8410;
+constexpr uint16_t C_ALERT   = 0xFD20;   // amber: someone is waiting on you
+constexpr uint16_t C_HAPPY   = 0x07E0;   // green: something finished
+
+// What is already on screen, so a repaint only happens when it must.
+BrunoMood g_lastMood = (BrunoMood)0xFF;
+char g_lastPane[SHEPHERD_PANE_LEN] = {0};
+char g_lastText[BRUNO_SAID_LEN] = {0};
+int g_lastWorking = -1, g_lastBlocked = -1, g_lastDone = -1;
+
+uint16_t moodColour(BrunoMood m) {
+  switch (m) {
+    case BRUNO_MOOD_ATTENTION:   return C_ALERT;
+    case BRUNO_MOOD_CELEBRATE:   return C_HAPPY;
+    case BRUNO_MOOD_STALE:
+    case BRUNO_MOOD_BAD_VERSION: return TFT_RED;
+    default:                     return C_DIM;
+  }
+}
+
+// ------------------------------------------------------------------- sheep
+
+void drawSheep(int cx, int cy, BrunoMood mood) {
+  const bool asleep = mood == BRUNO_MOOD_POTTER;
+  const bool alarmed = mood == BRUNO_MOOD_ATTENTION;
+  const bool happy = mood == BRUNO_MOOD_CELEBRATE;
+
+  // Celebrating lifts him a little off the ground. It is the cheapest
+  // possible "jumping for joy" and reads instantly from across a desk.
+  const int lift = happy ? 6 : 0;
+  const int by = cy - lift;
+
+  // Legs first, so the body sits over them.
+  for (int i = 0; i < 4; i++) {
+    const int lx = cx - 26 + i * 17;
+    M5.Display.fillRect(lx, by + 18, 5, 18, C_FACE);
+  }
+
+  // Body: overlapping circles make wool without needing a bitmap.
+  M5.Display.fillCircle(cx - 20, by + 2, 18, C_WOOL_SH);
+  M5.Display.fillCircle(cx + 12, by + 2, 18, C_WOOL_SH);
+  M5.Display.fillCircle(cx - 8,  by - 8, 20, C_WOOL);
+  M5.Display.fillCircle(cx + 12, by - 4, 17, C_WOOL);
+  M5.Display.fillCircle(cx - 24, by - 2, 16, C_WOOL);
+
+  // Head, turned to the right, dropped to the grass when pottering.
+  const int hx = cx + 34;
+  const int hy = by + (asleep ? 14 : -6);
+  M5.Display.fillEllipse(hx, hy, 13, 11, C_FACE);
+  // Ears. Up and forward when something wants attention.
+  M5.Display.fillEllipse(hx - 9, hy - (alarmed ? 12 : 8), 4, alarmed ? 8 : 5,
+                         C_FACE);
+  M5.Display.fillEllipse(hx + 7, hy - (alarmed ? 12 : 8), 4, alarmed ? 8 : 5,
+                         C_FACE);
+
+  // Eyes. Closed when pottering, wide when alarmed.
+  if (asleep) {
+    M5.Display.drawFastHLine(hx - 6, hy - 1, 6, C_WOOL);
+    M5.Display.drawFastHLine(hx + 2, hy - 1, 6, C_WOOL);
+  } else {
+    const int r = alarmed ? 3 : 2;
+    M5.Display.fillCircle(hx - 4, hy - 2, r, C_WOOL);
+    M5.Display.fillCircle(hx + 5, hy - 2, r, C_WOOL);
+  }
+}
+
+// ------------------------------------------------------------------ bubble
+
+// Wrap on spaces into the given box. The device's font is fixed-width at size
+// 1, so a character count is an honest measure of a line.
+void bubbleText(const char* text, int x, int y, int w, int maxLines) {
+  if (!text || !*text) return;
+  const int cols = w / 6;                 // 6px per glyph at size 1
+  int line = 0, i = 0;
+  const int len = (int)strlen(text);
+  while (i < len && line < maxLines) {
+    int take = cols;
+    if (i + take < len) {
+      int brk = -1;
+      for (int k = take; k > cols / 2; k--) {
+        if (text[i + k] == ' ') { brk = k; break; }
+      }
+      if (brk > 0) take = brk;
+    } else {
+      take = len - i;
+    }
+    char buf[64];
+    if (take > (int)sizeof(buf) - 1) take = sizeof(buf) - 1;
+    memcpy(buf, text + i, take);
+    buf[take] = 0;
+    M5.Display.drawString(buf, x, y + line * 12);
+    i += take;
+    while (i < len && text[i] == ' ') i++;
+    line++;
+  }
+}
+
+void drawBubble(const BrunoView& v) {
+  const int w = M5.Display.width();
+  const int bx = 10, by = 28, bw = w - 20, bh = 74;
+  M5.Display.fillRoundRect(bx, by, bw, bh, 8, C_BG);
+  if (!v.text[0] && !v.pane[0]) return;
+
+  const uint16_t edge = moodColour(v.mood);
+  M5.Display.drawRoundRect(bx, by, bw, bh, 8, edge);
+  // The tail, pointing down at the sheep.
+  M5.Display.fillTriangle(bx + 34, by + bh, bx + 46, by + bh,
+                          bx + 30, by + bh + 10, C_BG);
+  M5.Display.drawLine(bx + 34, by + bh, bx + 30, by + bh + 10, edge);
+  M5.Display.drawLine(bx + 30, by + bh + 10, bx + 46, by + bh, edge);
+
+  M5.Display.setTextSize(1);
+  if (v.pane[0]) {
+    M5.Display.setTextColor(edge, C_BG);
+    char who[40];
+    snprintf(who, sizeof(who), "%s %s", v.pane,
+             v.mood == BRUNO_MOOD_ATTENTION ? "is asking" : "finished");
+    M5.Display.drawString(who, bx + 10, by + 8);
+  }
+  M5.Display.setTextColor(C_TEXT, C_BG);
+  bubbleText(v.text, bx + 10, by + 24, bw - 20, 4);
+}
+
+// ------------------------------------------------------------------- strip
+
+void drawStrip(const BrunoView& v) {
+  const int w = M5.Display.width(), h = M5.Display.height();
+  M5.Display.fillRect(0, h - 16, w, 16, C_BG);
+  M5.Display.drawFastHLine(0, h - 18, w, C_DIM);
+  M5.Display.setTextSize(1);
+  char s[48];
+  snprintf(s, sizeof(s), "%d working   %d blocked   %d done", v.working,
+           v.blocked, v.done);
+  M5.Display.setTextColor(C_DIM, C_BG);
+  M5.Display.drawString(s, 8, h - 13);
+}
+
+// A device showing a calm herd it cannot actually see is lying. These two are
+// the same rule Shepherd draws, said in Bruno's own hand rather than shared -
+// shepherd_ui.cpp is not compiled into this environment, and dragging it in
+// would bring hal.h, the keyboard and the whole Cardputer with it.
+void drawNoSignal() {
+  const int w = M5.Display.width(), h = M5.Display.height();
+  M5.Display.fillScreen(C_BG);
+  M5.Display.setTextDatum(middle_center);
+  M5.Display.setTextColor(TFT_RED, C_BG);
+  M5.Display.setTextSize(2);
+  M5.Display.drawString("NO SIGNAL", w / 2, h / 2 - 12);
+  M5.Display.setTextSize(1);
+  M5.Display.setTextColor(C_DIM, C_BG);
+  M5.Display.drawString("no frame from the relay", w / 2, h / 2 + 14);
+  M5.Display.setTextDatum(top_left);
+}
+
+void drawBadVersion() {
+  const int w = M5.Display.width(), h = M5.Display.height();
+  M5.Display.fillScreen(C_BG);
+  M5.Display.setTextDatum(middle_center);
+  M5.Display.setTextColor(TFT_RED, C_BG);
+  M5.Display.setTextSize(2);
+  M5.Display.drawString("VERSION", w / 2, h / 2 - 12);
+  M5.Display.setTextSize(1);
+  M5.Display.setTextColor(C_DIM, C_BG);
+  char s[48];
+  snprintf(s, sizeof(s), "relay speaks past v%d", SHEPHERD_PROTOCOL_VERSION);
+  M5.Display.drawString(s, w / 2, h / 2 + 14);
+  M5.Display.drawString("reflash this device", w / 2, h / 2 + 30);
+  M5.Display.setTextDatum(top_left);
+}
+
+}  // namespace
+
+void brunoUiInvalidate() {
+  g_lastMood = (BrunoMood)0xFF;
+  g_lastPane[0] = 0;
+  g_lastText[0] = 0;
+  g_lastWorking = g_lastBlocked = g_lastDone = -1;
+}
+
+void brunoUiDraw(const BrunoView& v) {
+  const bool same = v.mood == g_lastMood
+                 && strcmp(v.pane, g_lastPane) == 0
+                 && strcmp(v.text, g_lastText) == 0
+                 && v.working == g_lastWorking
+                 && v.blocked == g_lastBlocked
+                 && v.done == g_lastDone;
+  if (same) return;
+
+  g_lastMood = v.mood;
+  strncpy(g_lastPane, v.pane, sizeof(g_lastPane) - 1);
+  g_lastPane[sizeof(g_lastPane) - 1] = 0;
+  strncpy(g_lastText, v.text, sizeof(g_lastText) - 1);
+  g_lastText[sizeof(g_lastText) - 1] = 0;
+  g_lastWorking = v.working;
+  g_lastBlocked = v.blocked;
+  g_lastDone = v.done;
+
+  if (v.mood == BRUNO_MOOD_STALE) { drawNoSignal(); return; }
+  if (v.mood == BRUNO_MOOD_BAD_VERSION) { drawBadVersion(); return; }
+
+  M5.Display.fillScreen(C_BG);
+  M5.Display.setTextDatum(top_left);
+  M5.Display.setTextSize(1);
+  M5.Display.setTextColor(moodColour(v.mood), C_BG);
+  M5.Display.drawString("BRUNO", 10, 8);
+
+  drawBubble(v);
+  drawSheep(M5.Display.width() / 2 - 10, 150, v.mood);
+  drawStrip(v);
+}

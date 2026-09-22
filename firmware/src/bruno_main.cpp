@@ -23,8 +23,24 @@
 
 #include "baa_wav.h"     // generated at build time from assets/bruno/baa.wav
 #include "bruno_frame.h"
+#include "bruno_ui.h"
+#include "bruno_view.h"
 #include "line_buf.h"
 #include "shepherd_frame.h"
+
+// The queue of finishes waiting their turn at the bubble, and the decision
+// about what is on screen right now. The policy is in bruno_view.h where the
+// native suite can reach it; this file only feeds it and draws the answer.
+static BrunoQueue g_queue;
+static BrunoView g_view;
+
+// When a frame last arrived. A device showing a calm herd it cannot see is
+// lying, so past this it says NO SIGNAL instead. Matches Shepherd's own
+// threshold.
+#define BRUNO_STALE_MS 30000
+static uint32_t g_lastFrameMs = 0;
+static bool g_everReceived = false;
+static bool g_badVersion = false;
 
 // One line at a time off the serial port, the same buffer Shepherd uses. Sized
 // by SHEPHERD_LINE_MAX for the same reason: the largest frame the host can
@@ -185,11 +201,12 @@ static void handleLine(const char* line) {
       g_saids++;
       Serial.printf("[bruno] said      : %s -> \"%s\"%s\n", g_said.pane,
                     g_said.body, g_said.truncated ? " (truncated)" : "");
-      M5.Display.fillRect(0, 100, M5.Display.width(), 60, TFT_BLACK);
-      M5.Display.setTextColor(TFT_GREEN, TFT_BLACK);
-      M5.Display.drawString(g_said.pane, 8, 100);
-      M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
-      M5.Display.drawString(g_said.body, 8, 116);
+      // Queue the words, and bleat NOW. The sound is the notification and it
+      // is cheap; only the bubble is contended. So a finish that lands behind
+      // a blocked agent is delayed on screen but never silent.
+      g_queue.push(g_said.pane, g_said.body);
+      M5.Speaker.setVolume(160);
+      M5.Speaker.playWav(baa_wav, sizeof(baa_wav));
       return;
     case BRUNO_BAD_VERSION:
       g_rejected++;
@@ -207,6 +224,11 @@ static void handleLine(const char* line) {
   switch (shepherdParse(line, &g_frame)) {
     case SHEPHERD_OK:
       g_frames++;
+      // Freshness is recorded here and nowhere else, so NO SIGNAL means "the
+      // relay stopped talking" rather than "nothing interesting happened".
+      g_lastFrameMs = millis();
+      g_everReceived = true;
+      g_badVersion = false;
       Serial.printf("[bruno] snap      : %d agent(s), ts=%s\n", g_frame.count,
                     g_frame.ts);
       for (int i = 0; i < g_frame.count; i++) {
@@ -217,6 +239,7 @@ static void handleLine(const char* line) {
       return;
     case SHEPHERD_BAD_VERSION:
       g_rejected++;
+      g_badVersion = true;
       Serial.printf("[bruno] snap      : REFUSED, wrong protocol version\n");
       return;
     case SHEPHERD_MALFORMED:
@@ -342,11 +365,21 @@ void loop() {
     if (g_line.push((char)Serial.read())) {
       // The `{` check is the caller's policy, not the buffer's, exactly as in
       // data.h. line_buf.h reassembles lines and does not care what is in them.
-      if (g_line.buf[0] == '{') {
-        handleLine(g_line.buf);
-        showCounts();
-      }
+      if (g_line.buf[0] == '{') handleLine(g_line.buf);
     }
+  }
+
+  // Decide and draw at 5Hz. brunoUiDraw is a no-op when nothing it cares
+  // about changed, so this is cheap; the rate only bounds how quickly a
+  // celebration can give way to the next one.
+  static uint32_t nextDraw = 0;
+  const uint32_t now = millis();
+  if ((int32_t)(now - nextDraw) >= 0) {
+    nextDraw = now + 200;
+    const bool fresh = g_everReceived
+                    && (uint32_t)(now - g_lastFrameMs) < BRUNO_STALE_MS;
+    brunoDecide(g_frame, g_queue, now, fresh, g_badVersion, &g_view);
+    brunoUiDraw(g_view);
   }
 
   delay(5);
