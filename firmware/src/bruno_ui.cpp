@@ -124,24 +124,43 @@ void drawClouds() {
   drawCloud(((g_drift * 2 / 3 + 170) % (w + 80)) - 40, 10, 9);
 }
 
+// Where the speech bubble sits. Named up here rather than left as locals in
+// drawBubble() because the nameplate below is sized against them, and two
+// copies of a number are two numbers that will disagree eventually.
+constexpr int kBubbleY0 = 28, kBubbleH = 74;
+
 // His name, in the sky just under the clouds.
 //
-// Sitting INSIDE the bubble's footprint (y 28..102) is the point, not an
-// oversight: when he has something to say, the words take the space and the
-// nameplate goes. A screen that is telling you an agent finished should not
-// also be introducing itself.
-//
-// It survives the cloud tick for free - drawClouds() repaints y 0..30 and
-// stops above this - so it costs nothing per frame and is drawn only when
-// the whole scene is.
+// Sitting INSIDE the bubble's footprint is the point, not an oversight: when
+// he has something to say, the words take the space and the nameplate goes.
+// A screen that is telling you an agent finished should not also be
+// introducing itself.
 //
 // Yellowtail is a brush script, which is the closest thing M5GFX ships to a
-// name painted on a farm gate. Drawn at its NATIVE 32, not scaled up from
-// the block font: LovyanGFX scales glyphs nearest-neighbour, and a script's
-// thin stroke ends are exactly what that ruins. Its 45px line height is
-// near enough three times the 16px it replaces to be what was asked for,
-// and 38+45 still lands inside the bubble's 28..102 with room to spare.
-constexpr int kNameY = 38;
+// name painted on a farm gate.
+//
+// How big it can get is decided by two hard edges, not by taste:
+//
+//   TOP     drawClouds() repaints y 0..kCloudY1 on every drift tick and does
+//           not redraw this, so anything above that line gets its head shaved
+//           off once a second.
+//   BOTTOM  past the bubble's own bottom edge, the tail of the name pokes out
+//           from under the bubble and over the sheep - which would break the
+//           one rule this thing has.
+//
+// That leaves 72px, and Yellowtail's 45px line height goes into it 1.5 times.
+// So 1.5 is not a look, it is the ceiling. Bigger means either a shaved top,
+// a name hanging out below the bubble, or moving the bubble.
+constexpr float kNameScale = 1.5f;
+constexpr int kNameY = 33;
+constexpr int kNameH = (int)(45 * kNameScale);   // Yellowtail_32's yAdvance
+
+static_assert(kNameY >= kCloudY1,
+              "the name starts inside the cloud band, so the drift tick will "
+              "wipe its top edge every second and never put it back");
+static_assert(kNameY + kNameH <= kBubbleY0 + kBubbleH,
+              "the name is taller than the bubble that is supposed to hide "
+              "it, so it will hang out underneath whenever Bruno speaks");
 
 void drawName() {
   // One-argument setTextColor sets fore == back, which LovyanGFX reads as
@@ -150,12 +169,13 @@ void drawName() {
   M5.Display.setFont(&fonts::Yellowtail_32);
   M5.Display.setTextDatum(top_center);
   M5.Display.setTextColor(C_NAME);
-  M5.Display.setTextSize(1);
+  M5.Display.setTextSize(kNameScale);
   M5.Display.drawString("Bruno", M5.Display.width() / 2, kNameY);
-  // Put the block font back. Everything after this - the bubble, the strip -
-  // calls drawString without setting a font, so leaving Yellowtail installed
-  // would quietly redraw the whole UI in brush script.
+  // Put the block font back, at size 1. Everything after this - the bubble,
+  // the strip - calls drawString without setting either, so leaving them as
+  // they are would redraw the whole UI in half-again-size brush script.
   M5.Display.setFont(&fonts::Font0);
+  M5.Display.setTextSize(1);
   M5.Display.setTextDatum(top_left);
 }
 
@@ -440,7 +460,7 @@ void drawBubble(const BrunoView& v) {
   if (!v.text[0] && !v.pane[0]) return;
 
   const int w = M5.Display.width();
-  const int bx = 10, by = 28, bw = w - 20, bh = 74;
+  const int bx = 10, by = kBubbleY0, bw = w - 20, bh = kBubbleH;
   const uint16_t edge = moodColour(v.mood);
   M5.Display.fillRoundRect(bx, by, bw, bh, 8, C_BUBBLE);
   M5.Display.drawRoundRect(bx, by, bw, bh, 8, edge);
