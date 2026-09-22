@@ -92,13 +92,62 @@ static void probeI2C() {
   Serial.printf("%s\n", found ? "" : " (nothing answered)");
 }
 
+// WHICH board M5Unified thinks this is. Everything below depends on it: the
+// button pins, the speaker pin, and the display driver all come from this
+// answer. It was missing from the first probe, which is why "buttons and
+// speaker do nothing" had no obvious first suspect.
+static void probeBoard() {
+  const char* name = "unknown";
+  switch (M5.getBoard()) {
+    case m5::board_t::board_M5Stack:      name = "M5Stack (Core Basic/Grey)"; break;
+    case m5::board_t::board_M5StackCore2: name = "Core2"; break;
+    case m5::board_t::board_M5StackCoreS3: name = "CoreS3"; break;
+    case m5::board_t::board_M5StickC:     name = "StickC"; break;
+    case m5::board_t::board_M5StickCPlus: name = "StickC Plus"; break;
+    case m5::board_t::board_M5Cardputer:  name = "Cardputer"; break;
+    default: break;
+  }
+  Serial.printf("[bruno] board     : %s (enum %d)\n", name, (int)M5.getBoard());
+}
+
 static void probeSpeaker() {
-  // Short and quiet. SFX_VOLUME on Shepherd is 80 of 255 because the full
-  // volume was, in the owner's words, a bit loud.
-  M5.Speaker.setVolume(80);
-  M5.Speaker.tone(880, 120);
-  Serial.printf("[bruno] speaker   : tone sent (%s)\n",
-                M5.Speaker.isEnabled() ? "enabled" : "NOT ENABLED");
+  // Loud and long on purpose for a bring-up probe. Shepherd's SFX_VOLUME of
+  // 80/255 was tuned for the Cardputer's transducer after "it was a bit
+  // loud"; nothing says that number carries to a different speaker on a
+  // different board, and a probe that cannot be heard proves nothing.
+  M5.Speaker.setVolume(255);
+  const bool ok = M5.Speaker.tone(2000, 400);
+  Serial.printf("[bruno] speaker   : enabled=%d volume=%d tone()=%s\n",
+                (int)M5.Speaker.isEnabled(), (int)M5.Speaker.getVolume(),
+                ok ? "accepted" : "REFUSED");
+  // tone() is asynchronous - it queues on a background task. Returning
+  // straight into setup() could have the sketch move on before a note ever
+  // reached the DAC, which would look exactly like a dead speaker.
+  M5.Speaker.end();
+  M5.Speaker.begin();
+  M5.Speaker.setVolume(255);
+  M5.Speaker.tone(1000, 400);
+  delay(600);
+  Serial.printf("[bruno] speaker   : second tone after an explicit "
+                "end()/begin(), playing=%d\n", (int)M5.Speaker.isPlaying());
+}
+
+// Read the button GPIOs directly, beside what M5Unified reports. If the raw
+// pin moves and M5.BtnX does not, the fault is in board detection or pin
+// mapping. If neither moves, the pins themselves are wrong for this hardware.
+// One probe distinguishes two very different problems.
+static constexpr int BTN_A_PIN = 39;
+static constexpr int BTN_B_PIN = 38;
+static constexpr int BTN_C_PIN = 37;
+
+static void probeButtonPins() {
+  pinMode(BTN_A_PIN, INPUT);
+  pinMode(BTN_B_PIN, INPUT);
+  pinMode(BTN_C_PIN, INPUT);
+  Serial.printf("[bruno] btn pins  : raw A(39)=%d B(38)=%d C(37)=%d "
+                "(1 = released, these are active-low)\n",
+                digitalRead(BTN_A_PIN), digitalRead(BTN_B_PIN),
+                digitalRead(BTN_C_PIN));
 }
 
 // ---------------------------------------------------------------- screen
@@ -191,9 +240,11 @@ void setup() {
   delay(200);   // let the bridge settle before the first line
 
   Serial.printf("\n[bruno] ===== probe build, %s %s =====\n", __DATE__, __TIME__);
+  probeBoard();
   probeChip();
   probeImu();
   probeI2C();
+  probeButtonPins();
   probeSpeaker();
   Serial.printf("[bruno] buffers   : line=%d bytes, worst frame=%d\n",
                 SHEPHERD_LINE_MAX, SHEPHERD_WORST_FRAME);
@@ -204,15 +255,76 @@ void setup() {
   showCounts();
 }
 
+// A device that only speaks when something happens cannot be told apart from
+// a dead one. Shepherd carries the same heartbeat for the same reason, and it
+// is what caught a silent 25x throughput bug there. This one carries the RAW
+// pin states beside M5Unified's view, so a press is visible even if the
+// library's mapping is wrong.
+static void heartbeat() {
+  static uint32_t next = 0;
+  const uint32_t now = millis();
+  if ((int32_t)(now - next) < 0) return;
+  next = now + 2000;
+
+  Serial.printf("[bruno] HB %lus  m5=%c%c%c  raw=%d%d%d  bright=%d  "
+                "snap=%lu said=%lu dropped=%lu  heap=%u\n",
+                (unsigned long)(now / 1000),
+                M5.BtnA.isPressed() ? 'A' : '-',
+                M5.BtnB.isPressed() ? 'B' : '-',
+                M5.BtnC.isPressed() ? 'C' : '-',
+                digitalRead(BTN_A_PIN), digitalRead(BTN_B_PIN),
+                digitalRead(BTN_C_PIN),
+                M5.Display.getBrightness(),
+                (unsigned long)g_frames, (unsigned long)g_saids,
+                (unsigned long)g_line.dropped, (unsigned)ESP.getFreeHeap());
+
+  // Something that visibly moves, so a live screen and a frozen one are
+  // distinguishable from across the desk without reading anything.
+  static uint32_t beats = 0;
+  char tick[32];
+  snprintf(tick, sizeof(tick), "alive %lu", (unsigned long)++beats);
+  M5.Display.fillRect(0, M5.Display.height() - 20, M5.Display.width(), 20,
+                      TFT_BLACK);
+  M5.Display.setTextColor(TFT_DARKGREY, TFT_BLACK);
+  M5.Display.drawString(tick, 8, M5.Display.height() - 18);
+}
+
+// Raw, active-low, with a tiny debounce. Independent of M5Unified entirely,
+// so a press shows up here whatever the library thinks the board is.
+static bool rawPressed(int pin, bool* was) {
+  const bool down = digitalRead(pin) == LOW;
+  const bool edge = down && !*was;
+  *was = down;
+  return edge;
+}
+
 void loop() {
   M5.update();
+  heartbeat();
 
   // The remaining probe from the design's step 5. Reported rather than acted
   // on: Bruno is a tamagotchi, and what the buttons should DO is a decision
   // that belongs with the real UI.
-  if (M5.BtnA.wasPressed()) Serial.printf("[bruno] button    : A\n");
-  if (M5.BtnB.wasPressed()) Serial.printf("[bruno] button    : B\n");
-  if (M5.BtnC.wasPressed()) Serial.printf("[bruno] button    : C\n");
+  if (M5.BtnA.wasPressed()) Serial.printf("[bruno] button    : A (M5Unified)\n");
+  if (M5.BtnB.wasPressed()) Serial.printf("[bruno] button    : B (M5Unified)\n");
+  if (M5.BtnC.wasPressed()) Serial.printf("[bruno] button    : C (M5Unified)\n");
+
+  static bool wasA = false, wasB = false, wasC = false;
+  const char* raw = rawPressed(BTN_A_PIN, &wasA) ? "A"
+                  : rawPressed(BTN_B_PIN, &wasB) ? "B"
+                  : rawPressed(BTN_C_PIN, &wasC) ? "C" : nullptr;
+  if (raw) {
+    Serial.printf("[bruno] button    : %s (RAW GPIO)\n", raw);
+    // On screen and audible, so a press is confirmable without watching a
+    // serial monitor at all.
+    M5.Display.fillRect(0, 160, M5.Display.width(), 30, TFT_BLACK);
+    M5.Display.setTextColor(TFT_YELLOW, TFT_BLACK);
+    M5.Display.setTextSize(3);
+    M5.Display.drawString(raw, 8, 160);
+    M5.Display.setTextSize(1);
+    M5.Speaker.setVolume(255);
+    M5.Speaker.tone(1500, 80);
+  }
 
   while (Serial.available()) {
     if (g_line.push((char)Serial.read())) {
