@@ -227,7 +227,11 @@ constexpr uint32_t kNodStepMs   = 110;               // one step of the nod
 constexpr uint32_t kGrazeMinMs  = 2500, kGrazeVarMs = 3500;
 constexpr uint32_t kGapMinMs    = 9000, kGapVarMs   = 16000;
 constexpr uint32_t kBlinkMs     = 120;
-constexpr uint32_t kBlinkGapMin = 2500, kBlinkGapVar = 9000;
+// 1.2-4.2s between blinks. Was 2.5-11.5s, which averaged about seven seconds
+// and made him look glazed - long enough that you stopped expecting it and
+// then noticed it as a glitch. This is roughly the rate a person blinks at,
+// which is the rate that reads as "alive" rather than as "something moved".
+constexpr uint32_t kBlinkGapMin = 1200, kBlinkGapVar = 3000;
 constexpr uint32_t kBounceMs    = 90;                // celebration bounce step
 
 uint32_t g_now = 0;
