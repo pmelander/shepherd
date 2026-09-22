@@ -10,10 +10,13 @@
 // at ~15Hz and a full 320x240 repaint at that rate makes a desk toy flicker
 // like a fault rather than sit there being alive.
 //
-// HE is redrawn much more often, in a 108x96 patch, because a pet that only
-// moves when an agent finishes is a picture of a pet. The nod, the blink and
-// the occasional mouthful of grass all happen on the early-return path where
-// nothing about the herd has changed at all.
+// HE is redrawn much more often, in a 108x96 patch drawn OFF-SCREEN and
+// pushed in one go, because a pet that only moves when an agent finishes is a
+// picture of a pet. The blink and the occasional mouthful of grass happen on
+// the early-return path where nothing about the herd has changed at all.
+// Drawing that patch straight to the panel meant wiping the background and
+// then drawing over it with the display watching, which is a visible flash
+// per redraw; a sprite costs 20KB of heap and removes the seam entirely.
 //
 // The animation is timed in MILLISECONDS, not frames. Counting frames makes
 // the frame rate a secret parameter of every behaviour, so raising it speeds
@@ -163,43 +166,44 @@ struct SheepPose {
   bool earsUp;
 };
 
-void drawSheep(int cx, int cy, BrunoMood mood, const SheepPose& p) {
+void drawSheep(LovyanGFX* g, int cx, int cy, BrunoMood mood,
+               const SheepPose& p) {
   const bool alarmed = p.earsUp;
   const int by = cy - p.lift;
 
   // Legs first, so the body sits over them.
   for (int i = 0; i < 4; i++) {
     const int lx = cx - 26 + i * 17;
-    M5.Display.fillRect(lx, by + 18, 5, 18, C_FACE);
+    g->fillRect(lx, by + 18, 5, 18, C_FACE);
   }
 
   // Body: overlapping circles make wool without needing a bitmap.
-  M5.Display.fillCircle(cx - 20, by + 2, 18, C_WOOL_SH);
-  M5.Display.fillCircle(cx + 12, by + 2, 18, C_WOOL_SH);
-  M5.Display.fillCircle(cx - 8,  by - 8, 20, C_WOOL);
-  M5.Display.fillCircle(cx + 12, by - 4, 17, C_WOOL);
-  M5.Display.fillCircle(cx - 24, by - 2, 16, C_WOOL);
+  g->fillCircle(cx - 20, by + 2, 18, C_WOOL_SH);
+  g->fillCircle(cx + 12, by + 2, 18, C_WOOL_SH);
+  g->fillCircle(cx - 8,  by - 8, 20, C_WOOL);
+  g->fillCircle(cx + 12, by - 4, 17, C_WOOL);
+  g->fillCircle(cx - 24, by - 2, 16, C_WOOL);
 
   // Head, turned to the right. headDy is where the animation lives: it nods
   // gently while he is standing and drops to the grass when he grazes.
   const int hx = cx + kHeadDx;
   const int hy = by - 6 + p.headDy;
   // A neck, so the head does not detach from the body when it drops.
-  M5.Display.fillEllipse(hx - 12, (by - 6 + hy) / 2, 8, 11, C_WOOL);
-  M5.Display.fillEllipse(hx, hy, 13, 11, C_FACE);
+  g->fillEllipse(hx - 12, (by - 6 + hy) / 2, 8, 11, C_WOOL);
+  g->fillEllipse(hx, hy, 13, 11, C_FACE);
   // Ears. Up and forward when something wants attention.
-  M5.Display.fillEllipse(hx - 9, hy - (alarmed ? 12 : 8), 4, alarmed ? 8 : 5,
+  g->fillEllipse(hx - 9, hy - (alarmed ? 12 : 8), 4, alarmed ? 8 : 5,
                          C_FACE);
-  M5.Display.fillEllipse(hx + 7, hy - (alarmed ? 12 : 8), 4, alarmed ? 8 : 5,
+  g->fillEllipse(hx + 7, hy - (alarmed ? 12 : 8), 4, alarmed ? 8 : 5,
                          C_FACE);
 
   if (p.eyesShut) {
-    M5.Display.drawFastHLine(hx - 6, hy - 1, 6, C_WOOL);
-    M5.Display.drawFastHLine(hx + 2, hy - 1, 6, C_WOOL);
+    g->drawFastHLine(hx - 6, hy - 1, 6, C_WOOL);
+    g->drawFastHLine(hx + 2, hy - 1, 6, C_WOOL);
   } else {
     const int r = alarmed ? 3 : 2;
-    M5.Display.fillCircle(hx - 4, hy - 2, r, C_WOOL);
-    M5.Display.fillCircle(hx + 5, hy - 2, r, C_WOOL);
+    g->fillCircle(hx - 4, hy - 2, r, C_WOOL);
+    g->fillCircle(hx + 5, hy - 2, r, C_WOOL);
   }
   (void)mood;
 }
@@ -250,10 +254,14 @@ SheepPose poseFor(BrunoMood mood) {
     return p;
   }
 
-  // Idle and busy: a slow nod over about a second, with a pause at each end
-  // so it breathes instead of oscillating.
-  static const int kNod[10] = {0, -1, -2, -3, -3, -3, -2, -1, 0, 0};
-  p.headDy = kNod[(g_now / kNodStepMs) % 10];
+  // No nod. It was tried and removed: it changed every 110ms, and every
+  // change repaints his patch, so it turned the redraw seam into a permanent
+  // shimmer. The flicker is fixed below by drawing the patch off-screen, but
+  // the nod is not coming back on that account - three pixels of travel was
+  // never worth a redraw ten times a second. Blinking and grazing carry the
+  // aliveness between them, and they happen rarely enough to be events
+  // rather than texture.
+  p.headDy = 0;
   if (g_grazing) {
     p.headDy = 22;                     // down in the grass
     p.eyesShut = true;
@@ -291,22 +299,65 @@ void advanceAnimation(BrunoMood mood, uint32_t now) {
 
 // Repaint his patch of field and then him, so a nodding head does not smear
 // and a dropped one does not leave the old one behind.
-void drawSheepPatch(BrunoMood mood) {
-  M5.Display.setClipRect(sheepBoxX0(), kSheepBoxY0, kSheepBoxW,
-                         kSheepBoxY1 - kSheepBoxY0);
-  // NOT drawScene(). Clipping stops the pixels but not the work: the full
-  // scene issues 168 gradient rows plus the clouds and the sun, all of which
-  // are outside this box, and at fifteen frames a second that is most of the
-  // budget spent on drawing nothing. This draws only what is actually inside
-  // his patch - about fifty sky rows, the hills, and the grass.
+// The patch, drawn OFF-SCREEN and pushed in one operation.
+//
+// The first version drew straight to the display: wipe the background, then
+// draw the sheep. That is two passes over the same pixels with the panel
+// showing both, so every redraw was a visible flash - and with a nod changing
+// every 110ms it became a permanent shimmer that read as corruption. A sprite
+// costs 108*96*2 = 20,736 bytes out of 314KB of free heap, and the seam
+// disappears because the panel only ever sees a finished picture.
+//
+// It degrades rather than fails: if the allocation does not happen, the old
+// clipped path still draws, flicker and all.
+M5Canvas g_patch(&M5.Display);
+bool g_patchReady = false;
+bool g_patchTried = false;
+
+void paintPatchInto(LovyanGFX* g, int ox, int oy, BrunoMood mood) {
   const int w = M5.Display.width(), h = M5.Display.height();
-  skyBand(kSheepBoxY0, kSheepBoxY1 < kHorizon ? kSheepBoxY1 : kHorizon);
-  M5.Display.fillEllipse(w / 4, kHorizon + 26, w / 2 + 30, 34, C_HILL_FAR);
-  M5.Display.fillEllipse(w - 30, kHorizon + 30, w / 2, 32, C_HILL_FAR);
-  M5.Display.fillEllipse(w / 2 + 40, kHorizon + 34, w / 2, 30, C_HILL_MID);
-  M5.Display.fillRect(0, kHorizon + 22, w, h - kHorizon - 22, C_GRASS);
+  // NOT the whole scene. Clipping would stop the pixels but not the work: the
+  // full scene issues 168 gradient rows plus the clouds and the sun, all
+  // outside this box. Only what is actually inside his patch is drawn - about
+  // fifty sky rows, the hills, and the grass - with every coordinate shifted
+  // into the patch's own space.
+  const int span = kHorizon > 0 ? kHorizon : 1;
+  const int skyTo = kSheepBoxY1 < kHorizon ? kSheepBoxY1 : kHorizon;
+  for (int y = kSheepBoxY0; y < skyTo; y++) {
+    const int t = (y * 255) / span;
+    g->drawFastHLine(0, y - oy, kSheepBoxW,
+                     g->color565((uint8_t)((0x3C * (255 - t) + 0xA6 * t) / 255),
+                                 (uint8_t)((0x78 * (255 - t) + 0xD2 * t) / 255),
+                                 (uint8_t)((0xD8 * (255 - t) + 0xF5 * t) / 255)));
+  }
+  g->fillEllipse(w / 4 - ox, kHorizon + 26 - oy, w / 2 + 30, 34, C_HILL_FAR);
+  g->fillEllipse(w - 30 - ox, kHorizon + 30 - oy, w / 2, 32, C_HILL_FAR);
+  g->fillEllipse(w / 2 + 40 - ox, kHorizon + 34 - oy, w / 2, 30, C_HILL_MID);
+  g->fillRect(0, kHorizon + 22 - oy, kSheepBoxW, h - kHorizon - 22, C_GRASS);
   // Feet land IN the grass rather than on the horizon line.
-  drawSheep(sheepCx(), kHorizon - 14, mood, poseFor(mood));
+  drawSheep(g, sheepCx() - ox, kHorizon - 14 - oy, mood, poseFor(mood));
+}
+
+void drawSheepPatch(BrunoMood mood) {
+  const int ox = sheepBoxX0(), oy = kSheepBoxY0;
+  if (!g_patchTried) {
+    g_patchTried = true;
+    g_patch.setColorDepth(16);
+    g_patchReady = g_patch.createSprite(kSheepBoxW, kSheepBoxY1 - kSheepBoxY0)
+                   != nullptr;
+    Serial.printf("[bruno] sprite    : %s (%d bytes, heap left %u)\n",
+                  g_patchReady ? "allocated" : "FAILED - falling back to "
+                                               "direct draw",
+                  kSheepBoxW * (kSheepBoxY1 - kSheepBoxY0) * 2,
+                  (unsigned)ESP.getFreeHeap());
+  }
+  if (g_patchReady) {
+    paintPatchInto(&g_patch, ox, oy, mood);
+    g_patch.pushSprite(&M5.Display, ox, oy);
+    return;
+  }
+  M5.Display.setClipRect(ox, oy, kSheepBoxW, kSheepBoxY1 - kSheepBoxY0);
+  paintPatchInto(&M5.Display, 0, 0, mood);
   M5.Display.clearClipRect();
 }
 
