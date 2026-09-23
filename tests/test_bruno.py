@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -197,18 +198,93 @@ def test_an_unreadable_stamp_is_waited_for_not_treated_as_unsupervised(
     assert waits["n"] >= 3, "it gave up before Herdr had written its stamp"
 
 
-def test_an_unreachable_board_eventually_gives_up(monkeypatch, tmp_path):
-    # The backstop, and it deliberately depends on no env plumbing being
-    # right: a stuck follower holding nothing useful must make way.
+def test_an_unreachable_board_is_waited_for_not_given_up_on(monkeypatch,
+                                                            tmp_path):
+    # This used to assert the opposite: give up after five minutes and exit
+    # "so a restart can try cleanly". Nothing restarts it, so on 2026-09-22 a
+    # USB re-enumeration that cleared itself in minutes left Bruno dead for
+    # sixteen hours. Waiting is the whole fix.
     monkeypatch.setattr(B, "open_port", lambda *a, **k: (_ for _ in ()).throw(
         OSError("no such port")))
     monkeypatch.setattr(B, "candidates", lambda: [])
     bruno = B.Bruno(port="COM-nope", stream=tmp_path / "frames.ndjson")
     clock = Clock()
 
-    rc = run(bruno.run(sleep=fake_sleep_for(clock), clock=clock))
-    assert rc == 1, "it waited forever for a board that is not there"
-    assert clock.t >= B.PORT_GONE_AFTER
+    # A day of absence, and it is still waiting rather than gone.
+    async def sleep(d):
+        clock.t += d
+        if clock.t >= 86400:
+            bruno.stop()
+        await asyncio.sleep(0)
+
+    rc = run(bruno.run(sleep=sleep, clock=clock))
+    assert clock.t >= 86400, "it stopped waiting before the day was out"
+    assert rc == 0, "an absent board is not a failure, it is an absent board"
+
+
+def test_the_board_coming_back_is_picked_up_without_a_restart(monkeypatch,
+                                                              tmp_path):
+    # The half that matters. Last night's port DID come back; there was just
+    # nothing left running to notice.
+    opened: list[str] = []
+    gone = {"still": True}
+
+    class FakeSerial:
+        port = "COM-late"
+
+        def write(self, payload):
+            pass
+
+        def close(self):
+            pass
+
+    def open_port(port=None, *a, **k):
+        if gone["still"]:
+            raise OSError("no such port")
+        opened.append(port)
+        return FakeSerial()
+
+    monkeypatch.setattr(B, "open_port", open_port)
+    monkeypatch.setattr(B, "candidates", lambda: [])
+    bruno = B.Bruno(port="COM-late", stream=tmp_path / "frames.ndjson")
+    clock = Clock()
+
+    async def sleep(d):
+        clock.t += d
+        if clock.t >= 3600:
+            gone["still"] = False          # somebody plugs it back in
+        if opened:
+            bruno.stop()
+        await asyncio.sleep(0)
+
+    rc = run(bruno.run(sleep=sleep, clock=clock))
+    assert opened == ["COM-late"], "it never reopened the board that returned"
+    assert rc == 0
+
+
+def test_an_outage_is_logged_once_not_once_per_attempt(monkeypatch, tmp_path,
+                                                       caplog):
+    # Retrying forever at WARNING would have written ~6000 identical lines
+    # through last night, in a log whose job is to be readable when something
+    # has gone wrong.
+    monkeypatch.setattr(B, "open_port", lambda *a, **k: (_ for _ in ()).throw(
+        OSError("no such port")))
+    monkeypatch.setattr(B, "candidates", lambda: [])
+    bruno = B.Bruno(port="COM-nope", stream=tmp_path / "frames.ndjson")
+    clock = Clock()
+
+    async def sleep(d):
+        clock.t += d
+        if clock.t >= 3600:
+            bruno.stop()
+        await asyncio.sleep(0)
+
+    with caplog.at_level(logging.WARNING, logger="bruno"):
+        run(bruno.run(sleep=sleep, clock=clock))
+
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(warnings) == 1, (
+        f"an hour of absence produced {len(warnings)} warnings, not one")
 
 
 # ============================================================== the follower

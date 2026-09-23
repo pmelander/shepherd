@@ -24,9 +24,13 @@ and deleting it is the whole off switch.
 2026-09-05: `herdr session stop` does NOT kill the processes a startup hook
 spawned - they orphan and keep running. A Windows COM port is exclusive-open,
 so orphan number two cannot open the port and sits retrying forever while the
-screen goes stale. So this takes the same three precautions the relay does: an
-OS file lock, a watchdog on HERDR_SOCKET_PATH, and an independent backstop
-that gives up if the port stays unreachable.
+screen goes stale. So this takes the two precautions the relay does: an OS
+file lock, and a watchdog on HERDR_SOCKET_PATH.
+
+There was a third - give up after five minutes without the board - and it was
+wrong, because "Herdr will not supervise this" cuts both ways. It does not
+kill these processes, and it does not restart them either, so exiting handed
+over to nobody. See RETRY_DELAYS.
 
 **The file is opened, read, and CLOSED on every poll.** Not an efficiency
 choice - the opposite. Windows will not rename a file another process holds
@@ -94,13 +98,26 @@ LOCK_FILENAME = "bruno.lock"
 # one open-read-close.
 POLL_INTERVAL = 0.5
 
-# How long the board may be unreachable before this gives up and exits, so a
-# Herdr restart gets a clean process rather than inheriting a stuck one. The
-# relay has the same backstop for the same reason.
-PORT_GONE_AFTER = 300.0
-
 # Reconnect backoff after the board disappears, in seconds. Unplugging it is
-# normal, so this stays gentle and bounded.
+# normal, so this stays gentle and bounded - and it goes on forever.
+#
+# There used to be a PORT_GONE_AFTER here: five minutes without the board and
+# this exited, "so a restart can try cleanly". Nothing restarts it. Herdr
+# starts plugin processes and then leaves them alone - the docstring above
+# says so about session stop, verified in this project, and the same is true
+# of failures. So the exit handed over to a supervisor that does not exist.
+#
+# Measured cost of that, 2026-09-22: COM6 re-enumerated at 16:54:38, this gave
+# up at 16:59:46, the port came back by itself, and Bruno sat dead for sixteen
+# hours over a fault that had already cleared.
+#
+# The exit was defended as letting a stuck follower make way for a fresh one.
+# Making way is real, but the LOCK is what does it - a new follower takes
+# bruno.lock and the old one stands down. Dying was never what made way; it
+# only ever helped if something spawned the replacement.
+#
+# The relay, for what it is worth, already got this right: _transport_loop
+# reconnects to its Cardputer forever and has no equivalent give-up.
 RETRY_DELAYS = (1.0, 2.0, 5.0, 10.0)
 
 # Frames older than this are history rather than news. Matches
@@ -320,20 +337,38 @@ class Bruno:
 
     # -- the board ---------------------------------------------------------
 
-    def _connect(self) -> bool:
+    def _connect(self, clock: Callable[[], float]) -> bool:
+        """Open the board, or say why not.
+
+        Logged once per outage rather than once per attempt. Retrying forever
+        at WARNING would have written a line every ten seconds through last
+        night's sixteen hours - about six thousand of them, all saying the
+        same thing, in a log whose job is to be readable when something has
+        gone wrong. The relay's refresh() learned this first.
+        """
         try:
             # reset=False is the whole point: opening a port the obvious way
             # asserts DTR, which on these boards is the auto-reset line, so
             # every reconnect would reboot Bruno. See shepherd/serialport.py.
             self._serial = open_port(self.port)
-            log.info("writing to %s", self._serial.port)
-            self._unreachable_since = None
-            return True
         except Exception as e:  # noqa: BLE001 - pyserial raises several shapes
-            log.warning("cannot open %s (%s); ports seen: %s",
-                        self.port or "auto", e,
-                        ", ".join(candidates()) or "none")
+            if self._unreachable_since is None:
+                self._unreachable_since = clock()
+                log.warning("cannot open %s (%s); ports seen: %s. Still "
+                            "trying, and will keep trying - an unplugged "
+                            "board is not a fault.", self.port or "auto", e,
+                            ", ".join(candidates()) or "none")
+            else:
+                log.debug("still cannot open %s (%s)", self.port or "auto", e)
             return False
+
+        if self._unreachable_since is not None:
+            log.info("writing to %s again, after %.0fs away",
+                     self._serial.port, clock() - self._unreachable_since)
+            self._unreachable_since = None
+        else:
+            log.info("writing to %s", self._serial.port)
+        return True
 
     def _drop(self) -> None:
         if self._serial is not None:
@@ -348,19 +383,13 @@ class Bruno:
 
         while not self._stop:
             if self._serial is None:
-                if self._connect():
+                if self._connect(clock):
                     attempt = 0
                 else:
-                    if self._unreachable_since is None:
-                        self._unreachable_since = clock()
-                    elif clock() - self._unreachable_since >= PORT_GONE_AFTER:
-                        # Independent of any env plumbing being right, which
-                        # is the point: a stuck follower holding nothing
-                        # useful should make way for a fresh one.
-                        log.error("board unreachable for %.0fs; exiting so a "
-                                  "restart can try cleanly",
-                                  clock() - self._unreachable_since)
-                        return 1
+                    # No give-up. The only things that end this loop are
+                    # stop() and the HERDR_SOCKET_PATH watchdog - a board that
+                    # is not there is a board to wait for, not a reason to die
+                    # in a way nothing will notice.
                     await sleep(delays[min(attempt, len(delays) - 1)])
                     attempt += 1
                     continue
